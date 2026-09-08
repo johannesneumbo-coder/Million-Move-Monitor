@@ -3,7 +3,6 @@ import time
 from pathlib import Path
 
 import cv2
-import numpy as np
 
 from playwright.sync_api import sync_playwright
 
@@ -22,7 +21,10 @@ CHECK_SECONDS = int(
 )
 
 SCREENSHOT_FILE = Path(
-    os.getenv("SCREENSHOT_FILE", "/tmp/million_moves.png")
+    os.getenv(
+        "SCREENSHOT_FILE",
+        "/tmp/million_moves.png"
+    )
 )
 
 
@@ -79,6 +81,7 @@ def save_page_screenshot(page):
             path=str(SCREENSHOT_FILE),
             type="png"
         )
+
         return True
 
     except Exception as e:
@@ -87,10 +90,12 @@ def save_page_screenshot(page):
             type(e).__name__,
             str(e)
         )
+
         return False
 
 
 def monitor():
+
     print("Million Moves browser monitor started.")
     print("YouTube:", YOUTUBE_URL)
 
@@ -99,6 +104,7 @@ def monitor():
         browser = None
 
         try:
+
             browser = p.chromium.launch(
                 headless=True,
                 args=[
@@ -131,18 +137,22 @@ def monitor():
 
             time.sleep(10)
 
-            # Attempt to dismiss common YouTube overlays.
             try:
+
                 page.get_by_role(
                     "button",
                     name="Accept all"
                 ).click(timeout=3000)
-                print("YouTube consent accepted.")
+
+                print(
+                    "YouTube consent accepted."
+                )
 
             except Exception:
                 pass
 
             try:
+
                 page.get_by_role(
                     "button",
                     name="Skip"
@@ -151,8 +161,8 @@ def monitor():
             except Exception:
                 pass
 
-            # Attempt to start the video.
             try:
+
                 page.locator(
                     "video"
                 ).click(timeout=5000)
@@ -162,31 +172,49 @@ def monitor():
 
             time.sleep(5)
 
-            print("Browser monitoring is active.")
+            print(
+                "Browser monitoring is active."
+            )
 
             while True:
 
                 try:
+
                     if page.is_closed():
+
                         raise RuntimeError(
                             "YouTube browser page closed."
                         )
 
-                    save_page_screenshot(page)
+                    if not save_page_screenshot(
+                        page
+                    ):
+
+                        time.sleep(
+                            CHECK_SECONDS
+                        )
+
+                        continue
 
                     frame = cv2.imread(
                         str(SCREENSHOT_FILE)
                     )
 
                     if frame is None:
+
                         print(
                             "Could not read browser screenshot."
                         )
 
-                        time.sleep(CHECK_SECONDS)
+                        time.sleep(
+                            CHECK_SECONDS
+                        )
+
                         continue
 
-                    signal = detect_signal(frame)
+                    signal = detect_signal(
+                        frame
+                    )
 
                     if signal:
 
@@ -195,23 +223,30 @@ def monitor():
                             signal
                         )
 
-                        signal_key = make_signal_key(
-                            signal
+                        signal_key = (
+                            make_signal_key(
+                                signal
+                            )
                         )
 
                         if not signal_already_sent(
                             signal_key
                         ):
 
-                            message = format_message(
-                                signal
+                            message = (
+                                format_message(
+                                    signal
+                                )
                             )
 
-                            sent = send_whatsapp(
-                                message
+                            sent = (
+                                send_whatsapp(
+                                    message
+                                )
                             )
 
                             if sent:
+
                                 set_last_signal(
                                     signal_key
                                 )
@@ -220,7 +255,9 @@ def monitor():
                                     "New signal sent to WhatsApp."
                                 )
 
-                    time.sleep(CHECK_SECONDS)
+                    time.sleep(
+                        CHECK_SECONDS
+                    )
 
                 except Exception as e:
 
@@ -250,7 +287,9 @@ def monitor():
                 except Exception:
                     pass
 
-    print("Browser monitor stopped.")
+    print(
+        "Browser monitor stopped."
+    )
 
 
 if __name__ == "__main__":
