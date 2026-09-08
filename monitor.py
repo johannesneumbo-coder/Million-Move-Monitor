@@ -3,7 +3,6 @@ import time
 from pathlib import Path
 
 import cv2
-
 from playwright.sync_api import sync_playwright
 
 from detector import detect_signal
@@ -29,6 +28,7 @@ SCREENSHOT_FILE = Path(
 
 
 def make_signal_key(signal):
+
     direction = signal.get("direction")
     entry = signal.get("entry")
     sl = signal.get("sl")
@@ -38,6 +38,7 @@ def make_signal_key(signal):
 
 
 def format_message(signal):
+
     direction = signal["direction"]
 
     entry = signal.get("entry")
@@ -76,19 +77,34 @@ def format_message(signal):
 
 
 def save_page_screenshot(page):
+
+    print(
+        "Taking screenshot...",
+        flush=True
+    )
+
     try:
+
         page.screenshot(
             path=str(SCREENSHOT_FILE),
             type="png"
         )
 
+        print(
+            "Screenshot saved:",
+            str(SCREENSHOT_FILE),
+            flush=True
+        )
+
         return True
 
     except Exception as e:
+
         print(
             "Screenshot error:",
             type(e).__name__,
-            str(e)
+            str(e),
+            flush=True
         )
 
         return False
@@ -96,14 +112,37 @@ def save_page_screenshot(page):
 
 def monitor():
 
-    print("Million Moves browser monitor started.")
-    print("YouTube:", YOUTUBE_URL)
+    print(
+        "Million Moves browser monitor started.",
+        flush=True
+    )
+
+    print(
+        "YouTube:",
+        YOUTUBE_URL,
+        flush=True
+    )
+
+    print(
+        "Starting Playwright...",
+        flush=True
+    )
 
     with sync_playwright() as p:
+
+        print(
+            "Playwright started.",
+            flush=True
+        )
 
         browser = None
 
         try:
+
+            print(
+                "Launching Chromium...",
+                flush=True
+            )
 
             browser = p.chromium.launch(
                 headless=True,
@@ -115,6 +154,11 @@ def monitor():
                 ]
             )
 
+            print(
+                "Chromium launched.",
+                flush=True
+            )
+
             context = browser.new_context(
                 viewport={
                     "width": 1920,
@@ -123,9 +167,22 @@ def monitor():
                 device_scale_factor=1
             )
 
+            print(
+                "Browser context created.",
+                flush=True
+            )
+
             page = context.new_page()
 
-            print("Opening YouTube live page...")
+            print(
+                "Browser page created.",
+                flush=True
+            )
+
+            print(
+                "Opening YouTube live page...",
+                flush=True
+            )
 
             page.goto(
                 YOUTUBE_URL,
@@ -133,52 +190,105 @@ def monitor():
                 timeout=60000
             )
 
-            print("YouTube page opened.")
+            print(
+                "YouTube page opened.",
+                flush=True
+            )
 
             time.sleep(10)
+
+            print(
+                "Checking YouTube consent...",
+                flush=True
+            )
 
             try:
 
                 page.get_by_role(
                     "button",
                     name="Accept all"
-                ).click(timeout=3000)
+                ).click(
+                    timeout=3000
+                )
 
                 print(
-                    "YouTube consent accepted."
+                    "YouTube consent accepted.",
+                    flush=True
                 )
 
             except Exception:
-                pass
+
+                print(
+                    "No consent button found.",
+                    flush=True
+                )
+
+            print(
+                "Checking Skip button...",
+                flush=True
+            )
 
             try:
 
                 page.get_by_role(
                     "button",
                     name="Skip"
-                ).click(timeout=3000)
+                ).click(
+                    timeout=3000
+                )
+
+                print(
+                    "Skip button clicked.",
+                    flush=True
+                )
 
             except Exception:
-                pass
+
+                print(
+                    "No Skip button found.",
+                    flush=True
+                )
+
+            print(
+                "Checking video element...",
+                flush=True
+            )
 
             try:
 
                 page.locator(
                     "video"
-                ).click(timeout=5000)
+                ).click(
+                    timeout=5000
+                )
+
+                print(
+                    "Video clicked.",
+                    flush=True
+                )
 
             except Exception:
-                pass
+
+                print(
+                    "Video click not required.",
+                    flush=True
+                )
 
             time.sleep(5)
 
             print(
-                "Browser monitoring is active."
+                "Browser monitoring is active.",
+                flush=True
             )
 
             while True:
 
                 try:
+
+                    print(
+                        "Monitor loop running...",
+                        flush=True
+                    )
 
                     if page.is_closed():
 
@@ -196,6 +306,11 @@ def monitor():
 
                         continue
 
+                    print(
+                        "Reading screenshot...",
+                        flush=True
+                    )
+
                     frame = cv2.imread(
                         str(SCREENSHOT_FILE)
                     )
@@ -203,7 +318,8 @@ def monitor():
                     if frame is None:
 
                         print(
-                            "Could not read browser screenshot."
+                            "Could not read browser screenshot.",
+                            flush=True
                         )
 
                         time.sleep(
@@ -211,6 +327,11 @@ def monitor():
                         )
 
                         continue
+
+                    print(
+                        "Running signal detector...",
+                        flush=True
+                    )
 
                     signal = detect_signal(
                         frame
@@ -220,7 +341,8 @@ def monitor():
 
                         print(
                             "Signal detected:",
-                            signal
+                            signal,
+                            flush=True
                         )
 
                         signal_key = (
@@ -232,6 +354,11 @@ def monitor():
                         if not signal_already_sent(
                             signal_key
                         ):
+
+                            print(
+                                "New signal. Sending WhatsApp...",
+                                flush=True
+                            )
 
                             message = (
                                 format_message(
@@ -252,8 +379,16 @@ def monitor():
                                 )
 
                                 print(
-                                    "New signal sent to WhatsApp."
+                                    "New signal sent to WhatsApp.",
+                                    flush=True
                                 )
+
+                    else:
+
+                        print(
+                            "No signal detected.",
+                            flush=True
+                        )
 
                     time.sleep(
                         CHECK_SECONDS
@@ -264,7 +399,8 @@ def monitor():
                     print(
                         "Monitoring error:",
                         type(e).__name__,
-                        str(e)
+                        str(e),
+                        flush=True
                     )
 
                     time.sleep(10)
@@ -274,23 +410,43 @@ def monitor():
             print(
                 "Browser startup error:",
                 type(e).__name__,
-                str(e)
+                str(e),
+                flush=True
             )
 
         finally:
 
+            print(
+                "Closing browser...",
+                flush=True
+            )
+
             if browser is not None:
 
                 try:
+
                     browser.close()
 
-                except Exception:
-                    pass
+                    print(
+                        "Browser closed.",
+                        flush=True
+                    )
+
+                except Exception as e:
+
+                    print(
+                        "Browser close error:",
+                        type(e).__name__,
+                        str(e),
+                        flush=True
+                    )
 
     print(
-        "Browser monitor stopped."
+        "Browser monitor stopped.",
+        flush=True
     )
 
 
 if __name__ == "__main__":
+
     monitor()
