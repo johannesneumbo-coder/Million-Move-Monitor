@@ -5,4 +5,4 @@ numpy
 pytesseract
 requests
 python-dotenv
-playwright==1.62.0
+playwright==1.62.0 
