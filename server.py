@@ -1,23 +1,12 @@
-import threading
-
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 from storage import load_state
 
 
-app = FastAPI(title="Million Moves Monitor")
-
-
-DASHBOARD_TOKEN = ""
-
-
-def check_token(token):
-    if DASHBOARD_TOKEN and token != DASHBOARD_TOKEN:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid dashboard token"
-        )
+app = FastAPI(
+    title="Million Moves Monitor"
+)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -26,6 +15,7 @@ def dashboard():
     return """
 <!DOCTYPE html>
 <html>
+
 <head>
 
 <meta name="viewport"
@@ -73,17 +63,23 @@ body {
 <h1>Million Moves V5</h1>
 
 <div class="status">
+
 Monitor:
-<b id="status">STARTING...</b>
+<b id="status">ONLINE</b>
+
 </div>
 
 <div>
+
 Signals sent:
 <b id="count">0</b>
+
 </div>
 
 <div id="signal">
+
 Waiting for signal...
+
 </div>
 
 </div>
@@ -125,6 +121,7 @@ async function updateStatus() {
             ).innerText =
                 "Last signal: " +
                 data.last_signal;
+
         }
 
     } catch (error) {
@@ -132,7 +129,9 @@ async function updateStatus() {
         document.getElementById(
             "status"
         ).innerText = "OFFLINE";
+
     }
+
 }
 
 updateStatus();
@@ -145,75 +144,27 @@ setInterval(
 </script>
 
 </body>
+
 </html>
 """
 
 
 @app.get("/api/status")
-def status(
-    x_dashboard_token: str = Header(default="")
-):
-
-    check_token(
-        x_dashboard_token
-    )
+def status():
 
     state = load_state()
 
     return {
+
         "monitor": "running",
+
         "last_signal":
             state.get("last_signal"),
+
         "signals_sent":
-            state.get("signals_sent", 0)
+            state.get(
+                "signals_sent",
+                0
+            )
+
     }
-
-
-def start_monitor():
-
-    print(
-        "Starting Million Moves monitor thread...",
-        flush=True
-    )
-
-    try:
-
-        from monitor import monitor
-
-        print(
-            "Monitor module loaded.",
-            flush=True
-        )
-
-        monitor()
-
-    except Exception as e:
-
-        print(
-            "Monitor thread stopped:",
-            type(e).__name__,
-            str(e),
-            flush=True
-        )
-
-
-@app.on_event("startup")
-def startup_event():
-
-    print(
-        "FastAPI startup event running...",
-        flush=True
-    )
-
-    thread = threading.Thread(
-        target=start_monitor,
-        daemon=True,
-        name="MillionMovesMonitor"
-    )
-
-    thread.start()
-
-    print(
-        "Million Moves monitor thread started.",
-        flush=True
-    )
