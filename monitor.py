@@ -1,7 +1,11 @@
 import os
 import time
+from pathlib import Path
+
 import cv2
-import yt_dlp
+import numpy as np
+
+from playwright.sync_api import sync_playwright
 
 from detector import detect_signal
 from storage import signal_already_sent, set_last_signal
@@ -13,72 +17,13 @@ YOUTUBE_URL = os.getenv(
     "https://www.youtube.com/watch?v=-ps7V40GrA4"
 )
 
-CHECK_SECONDS = int(os.getenv("CHECK_SECONDS", "3"))
+CHECK_SECONDS = int(
+    os.getenv("CHECK_SECONDS", "3")
+)
 
-
-def get_stream_url():
-    options = {
-        "quiet": True,
-        "no_warnings": False,
-        "skip_download": True,
-        "noplaylist": True,
-        "live_from_start": False,
-    }
-
-    with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(
-            YOUTUBE_URL,
-            download=False
-        )
-
-        if not info:
-            raise RuntimeError(
-                "YouTube did not return stream information."
-            )
-
-        # First try the URL selected by yt-dlp.
-        direct_url = info.get("url")
-
-        if direct_url:
-            return direct_url
-
-        # If there is no selected URL, find an available
-        # video stream manually.
-        formats = info.get("formats", [])
-
-        video_formats = []
-
-        for fmt in formats:
-            url = fmt.get("url")
-
-            if not url:
-                continue
-
-            protocol = str(fmt.get("protocol", "")).lower()
-            height = fmt.get("height") or 0
-            vcodec = fmt.get("vcodec")
-
-            if vcodec and vcodec != "none":
-                video_formats.append(
-                    (
-                        height,
-                        protocol,
-                        url
-                    )
-                )
-
-        if not video_formats:
-            raise RuntimeError(
-                "No usable live video format was returned by YouTube."
-            )
-
-        # Prefer the highest available video format.
-        video_formats.sort(
-            key=lambda x: x[0],
-            reverse=True
-        )
-
-        return video_formats[0][2]
+SCREENSHOT_FILE = Path(
+    os.getenv("SCREENSHOT_FILE", "/tmp/million_moves.png")
+)
 
 
 def make_signal_key(signal):
@@ -124,78 +69,188 @@ def format_message(signal):
         f"ENTRY: {entry_text}\n"
         f"S/L: {sl_text}\n"
         f"T/P: {tp_text}\n\n"
-        f"Detected from the live TradingView stream."
+        f"Detected from the Million Moves live stream."
     )
 
 
+def save_page_screenshot(page):
+    try:
+        page.screenshot(
+            path=str(SCREENSHOT_FILE),
+            type="png"
+        )
+        return True
+
+    except Exception as e:
+        print(
+            "Screenshot error:",
+            type(e).__name__,
+            str(e)
+        )
+        return False
+
+
 def monitor():
-    print("Million Moves monitor started.")
+    print("Million Moves browser monitor started.")
     print("YouTube:", YOUTUBE_URL)
 
-    while True:
-        capture = None
+    with sync_playwright() as p:
+
+        browser = None
 
         try:
-            print("Getting live YouTube stream...")
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--autoplay-policy=no-user-gesture-required"
+                ]
+            )
 
-            stream_url = get_stream_url()
+            context = browser.new_context(
+                viewport={
+                    "width": 1920,
+                    "height": 1080
+                },
+                device_scale_factor=1
+            )
 
-            print("Live stream URL obtained.")
-            print("Connecting to live stream...")
+            page = context.new_page()
 
-            capture = cv2.VideoCapture(stream_url)
+            print("Opening YouTube live page...")
 
-            if not capture.isOpened():
-                raise RuntimeError(
-                    "OpenCV could not open the YouTube stream."
-                )
+            page.goto(
+                YOUTUBE_URL,
+                wait_until="domcontentloaded",
+                timeout=60000
+            )
 
-            print("Live stream connected.")
+            print("YouTube page opened.")
+
+            time.sleep(10)
+
+            # Attempt to dismiss common YouTube overlays.
+            try:
+                page.get_by_role(
+                    "button",
+                    name="Accept all"
+                ).click(timeout=3000)
+                print("YouTube consent accepted.")
+
+            except Exception:
+                pass
+
+            try:
+                page.get_by_role(
+                    "button",
+                    name="Skip"
+                ).click(timeout=3000)
+
+            except Exception:
+                pass
+
+            # Attempt to start the video.
+            try:
+                page.locator(
+                    "video"
+                ).click(timeout=5000)
+
+            except Exception:
+                pass
+
+            time.sleep(5)
+
+            print("Browser monitoring is active.")
 
             while True:
-                success, frame = capture.read()
 
-                if not success:
-                    print("Stream frame unavailable.")
-                    break
+                try:
+                    if page.is_closed():
+                        raise RuntimeError(
+                            "YouTube browser page closed."
+                        )
 
-                signal = detect_signal(frame)
+                    save_page_screenshot(page)
 
-                if signal:
-                    print("Signal detected:", signal)
+                    frame = cv2.imread(
+                        str(SCREENSHOT_FILE)
+                    )
 
-                    signal_key = make_signal_key(signal)
+                    if frame is None:
+                        print(
+                            "Could not read browser screenshot."
+                        )
 
-                    if not signal_already_sent(signal_key):
-                        message = format_message(signal)
+                        time.sleep(CHECK_SECONDS)
+                        continue
 
-                        sent = send_whatsapp(message)
+                    signal = detect_signal(frame)
 
-                        if sent:
-                            set_last_signal(signal_key)
-                            print(
-                                "New signal sent to WhatsApp."
+                    if signal:
+
+                        print(
+                            "Signal detected:",
+                            signal
+                        )
+
+                        signal_key = make_signal_key(
+                            signal
+                        )
+
+                        if not signal_already_sent(
+                            signal_key
+                        ):
+
+                            message = format_message(
+                                signal
                             )
-                        else:
-                            print(
-                                "WhatsApp message was not sent."
+
+                            sent = send_whatsapp(
+                                message
                             )
 
-                time.sleep(CHECK_SECONDS)
+                            if sent:
+                                set_last_signal(
+                                    signal_key
+                                )
+
+                                print(
+                                    "New signal sent to WhatsApp."
+                                )
+
+                    time.sleep(CHECK_SECONDS)
+
+                except Exception as e:
+
+                    print(
+                        "Monitoring error:",
+                        type(e).__name__,
+                        str(e)
+                    )
+
+                    time.sleep(10)
 
         except Exception as e:
+
             print(
-                "Monitor error:",
+                "Browser startup error:",
                 type(e).__name__,
                 str(e)
             )
 
         finally:
-            if capture is not None:
-                capture.release()
 
-        print("Reconnecting to YouTube...")
-        time.sleep(10)
+            if browser is not None:
+
+                try:
+                    browser.close()
+
+                except Exception:
+                    pass
+
+    print("Browser monitor stopped.")
 
 
 if __name__ == "__main__":
