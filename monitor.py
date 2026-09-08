@@ -20,7 +20,7 @@ def get_stream_url():
     options = {
         "quiet": True,
         "no_warnings": True,
-        "format": "best[height<=720]/best"
+        "format": "best"
     }
 
     with yt_dlp.YoutubeDL(options) as ydl:
@@ -48,9 +48,23 @@ def format_message(signal):
     sl = signal.get("sl")
     tp = signal.get("tp")
 
-    entry_text = f"{entry:.2f}" if entry is not None else "Detected"
-    sl_text = f"{sl:.2f}" if sl is not None else "Not detected"
-    tp_text = f"{tp:.2f}" if tp is not None else "Not detected"
+    entry_text = (
+        f"{entry:.2f}"
+        if entry is not None
+        else "Not detected"
+    )
+
+    sl_text = (
+        f"{sl:.2f}"
+        if sl is not None
+        else "Not detected"
+    )
+
+    tp_text = (
+        f"{tp:.2f}"
+        if tp is not None
+        else "Not detected"
+    )
 
     if direction == "BUY":
         emoji = "🟢"
@@ -76,6 +90,8 @@ def monitor():
         capture = None
 
         try:
+            print("Getting live YouTube stream...")
+
             stream_url = get_stream_url()
 
             if not stream_url:
@@ -83,7 +99,8 @@ def monitor():
                 time.sleep(15)
                 continue
 
-            print("Live stream connected.")
+            print("Live stream URL obtained.")
+            print("Connecting to live stream...")
 
             capture = cv2.VideoCapture(stream_url)
 
@@ -91,6 +108,8 @@ def monitor():
                 print("Could not open live stream.")
                 time.sleep(15)
                 continue
+
+            print("Live stream connected.")
 
             while True:
                 success, frame = capture.read()
@@ -102,29 +121,34 @@ def monitor():
                 signal = detect_signal(frame)
 
                 if signal:
+                    print("Signal detected:", signal)
+
                     signal_key = make_signal_key(signal)
 
-                    print("SIGNAL:", signal)
-
                     if not signal_already_sent(signal_key):
+
                         message = format_message(signal)
 
                         sent = send_whatsapp(message)
 
                         if sent:
                             set_last_signal(signal_key)
-                            print("New signal sent.")
+                            print("New signal sent to WhatsApp.")
+                        else:
+                            print(
+                                "WhatsApp message was not sent."
+                            )
 
                 time.sleep(CHECK_SECONDS)
 
         except Exception as e:
-            print("Monitor error:", e)
+            print("Monitor error:", repr(e))
 
         finally:
             if capture is not None:
                 capture.release()
 
-        print("Reconnecting...")
+        print("Reconnecting to YouTube...")
         time.sleep(10)
 
 
