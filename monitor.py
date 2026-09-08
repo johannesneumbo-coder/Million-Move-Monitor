@@ -19,8 +19,10 @@ CHECK_SECONDS = int(os.getenv("CHECK_SECONDS", "3"))
 def get_stream_url():
     options = {
         "quiet": True,
-        "no_warnings": True,
-        "format": "best"
+        "no_warnings": False,
+        "skip_download": True,
+        "noplaylist": True,
+        "live_from_start": False,
     }
 
     with yt_dlp.YoutubeDL(options) as ydl:
@@ -29,7 +31,54 @@ def get_stream_url():
             download=False
         )
 
-        return info.get("url")
+        if not info:
+            raise RuntimeError(
+                "YouTube did not return stream information."
+            )
+
+        # First try the URL selected by yt-dlp.
+        direct_url = info.get("url")
+
+        if direct_url:
+            return direct_url
+
+        # If there is no selected URL, find an available
+        # video stream manually.
+        formats = info.get("formats", [])
+
+        video_formats = []
+
+        for fmt in formats:
+            url = fmt.get("url")
+
+            if not url:
+                continue
+
+            protocol = str(fmt.get("protocol", "")).lower()
+            height = fmt.get("height") or 0
+            vcodec = fmt.get("vcodec")
+
+            if vcodec and vcodec != "none":
+                video_formats.append(
+                    (
+                        height,
+                        protocol,
+                        url
+                    )
+                )
+
+        if not video_formats:
+            raise RuntimeError(
+                "No usable live video format was returned by YouTube."
+            )
+
+        # Prefer the highest available video format.
+        video_formats.sort(
+            key=lambda x: x[0],
+            reverse=True
+        )
+
+        return video_formats[0][2]
 
 
 def make_signal_key(signal):
@@ -66,10 +115,7 @@ def format_message(signal):
         else "Not detected"
     )
 
-    if direction == "BUY":
-        emoji = "🟢"
-    else:
-        emoji = "🔴"
+    emoji = "🟢" if direction == "BUY" else "🔴"
 
     return (
         f"{emoji} MILLION MOVES V5 SIGNAL\n\n"
@@ -94,20 +140,15 @@ def monitor():
 
             stream_url = get_stream_url()
 
-            if not stream_url:
-                print("Could not obtain live stream URL.")
-                time.sleep(15)
-                continue
-
             print("Live stream URL obtained.")
             print("Connecting to live stream...")
 
             capture = cv2.VideoCapture(stream_url)
 
             if not capture.isOpened():
-                print("Could not open live stream.")
-                time.sleep(15)
-                continue
+                raise RuntimeError(
+                    "OpenCV could not open the YouTube stream."
+                )
 
             print("Live stream connected.")
 
@@ -126,14 +167,15 @@ def monitor():
                     signal_key = make_signal_key(signal)
 
                     if not signal_already_sent(signal_key):
-
                         message = format_message(signal)
 
                         sent = send_whatsapp(message)
 
                         if sent:
                             set_last_signal(signal_key)
-                            print("New signal sent to WhatsApp.")
+                            print(
+                                "New signal sent to WhatsApp."
+                            )
                         else:
                             print(
                                 "WhatsApp message was not sent."
@@ -142,7 +184,11 @@ def monitor():
                 time.sleep(CHECK_SECONDS)
 
         except Exception as e:
-            print("Monitor error:", repr(e))
+            print(
+                "Monitor error:",
+                type(e).__name__,
+                str(e)
+            )
 
         finally:
             if capture is not None:
