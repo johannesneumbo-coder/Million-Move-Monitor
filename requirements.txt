@@ -1,0 +1,8 @@
+fastapi
+unicorn[standard]
+opencv-python-headless
+numpy
+pytesseract
+yt-dlp
+requests
+python-dotenv
