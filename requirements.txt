@@ -1,5 +1,5 @@
 fastapi
-unicorn[standard]
+uvicorn[standard]
 opencv-python-headless
 numpy
 pytesseract
