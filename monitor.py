@@ -1,13 +1,8 @@
 import os
 import time
-import threading
-from io import BytesIO
 
 import cv2
 import numpy as np
-
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import StreamingResponse
 from playwright.sync_api import sync_playwright
 
 from detector import detect_signal
@@ -15,177 +10,45 @@ from storage import signal_already_sent, set_last_signal
 from whatsapp import send_whatsapp
 
 
-# ============================================================
-# SETTINGS
-# ============================================================
-
 YOUTUBE_URL = os.getenv(
     "YOUTUBE_URL",
     "https://www.youtube.com/watch?v=-ps7V40GrA4"
 )
 
-CHECK_SECONDS = max(
-    5,
-    int(os.getenv("CHECK_SECONDS", "5"))
-)
-
-BLOCKED_RETRY_SECONDS = 300
-ERROR_RETRY_SECONDS = 60
+CHECK_SECONDS = max(5, int(os.getenv("CHECK_SECONDS", "5")))
+RETRY_SECONDS = 300
 
 VIEWPORT_WIDTH = 1280
 VIEWPORT_HEIGHT = 720
 
-FRAME_PASSWORD = os.getenv(
-    "FRAME_PASSWORD",
-    ""
-)
-
-
-# ============================================================
-# SHARED FRAME
-# ============================================================
-
-_frame_lock = threading.Lock()
-_latest_frame = None
-
-
-def store_frame(frame):
-
-    global _latest_frame
-
-    if frame is None:
-        return
-
-    with _frame_lock:
-
-        _latest_frame = frame.copy()
-
-
-def get_latest_frame():
-
-    with _frame_lock:
-
-        if _latest_frame is None:
-            return None
-
-        return _latest_frame.copy()
-
-
-# ============================================================
-# FRAME VIEWER
-# ============================================================
-
-app = FastAPI()
-
-
-@app.get("/frame")
-def view_frame(password: str = Query(default="")):
-
-    if not FRAME_PASSWORD:
-
-        raise HTTPException(
-            status_code=503,
-            detail="FRAME_PASSWORD is not configured."
-        )
-
-    if password != FRAME_PASSWORD:
-
-        raise HTTPException(
-            status_code=403,
-            detail="Incorrect password."
-        )
-
-    frame = get_latest_frame()
-
-    if frame is None:
-
-        raise HTTPException(
-            status_code=503,
-            detail="No video frame captured yet."
-        )
-
-    success, encoded = cv2.imencode(
-        ".jpg",
-        frame,
-        [
-            cv2.IMWRITE_JPEG_QUALITY,
-            95
-        ]
-    )
-
-    if not success:
-
-        raise HTTPException(
-            status_code=500,
-            detail="Could not encode frame."
-        )
-
-    return StreamingResponse(
-        BytesIO(encoded.tobytes()),
-        media_type="image/jpeg",
-        headers={
-            "Cache-Control": "no-store"
-        }
-    )
-
-
-# ============================================================
-# SIGNAL KEY
-# ============================================================
 
 def make_signal_key(signal):
-
-    direction = str(
-        signal.get("direction", "")
-    ).upper()
+    direction = str(signal.get("direction", "")).upper()
 
     if direction not in ("BUY", "SELL"):
         return None
 
     try:
-
-        entry = float(
-            signal["entry"]
-        )
-
+        entry = float(signal["entry"])
     except (KeyError, TypeError, ValueError):
-
         return None
 
     return f"{direction}|{entry:.2f}"
 
 
-# ============================================================
-# PRICE FORMAT
-# ============================================================
-
 def price_text(value):
-
     if value is None:
         return "Not confirmed"
 
     try:
-
         return f"{float(value):.2f}"
-
     except (TypeError, ValueError):
-
         return "Not confirmed"
 
 
-# ============================================================
-# WHATSAPP MESSAGE
-# ============================================================
-
 def format_message(signal):
-
     direction = signal["direction"]
-
-    emoji = (
-        "🟢"
-        if direction == "BUY"
-        else "🔴"
-    )
+    emoji = "🟢" if direction == "BUY" else "🔴"
 
     return (
         f"{emoji} MILLION MOVES V5 SIGNAL\n\n"
@@ -195,59 +58,31 @@ def format_message(signal):
         f"S/L: {price_text(signal.get('sl'))}\n"
         f"TP1: {price_text(signal.get('tp1'))}\n"
         f"TP2: {price_text(signal.get('tp2'))}\n"
-        f"TP3: {price_text(signal.get('tp3'))}\n\n"
-        f"Detected from the Million Moves stream."
+        f"TP3: {price_text(signal.get('tp3'))}"
     )
 
 
-# ============================================================
-# CHECK YOUTUBE ACCESS
-# ============================================================
-
 def youtube_block_reason(page):
-
     try:
-
-        body = page.locator(
-            "body"
-        ).inner_text(
-            timeout=5000
-        ).lower()
-
+        body = page.locator("body").inner_text(timeout=5000).lower()
     except Exception:
-
         return None
 
-    indicators = [
-        "sign in to confirm",
-        "not a bot",
-        "unusual traffic",
-        "our systems have detected unusual traffic",
-        "captcha"
-    ]
+    if "sign in to confirm" in body and "not a bot" in body:
+        return "YouTube requires sign-in verification"
 
-    for indicator in indicators:
-
-        if indicator in body:
-
-            return indicator
+    if "unusual traffic" in body:
+        return "YouTube detected unusual traffic"
 
     return None
 
 
-# ============================================================
-# VIDEO STATE
-# ============================================================
-
-def get_video_state(page):
-
+def video_state(page):
     return page.evaluate(
         """() => {
+            const video = document.querySelector('video');
 
-            const v = document.querySelector('video');
-
-            if (!v) {
-
+            if (!video) {
                 return {
                     found: false,
                     ready: 0,
@@ -255,34 +90,22 @@ def get_video_state(page):
                     height: 0,
                     paused: true
                 };
-
             }
 
             return {
                 found: true,
-                ready: v.readyState,
-                width: v.videoWidth,
-                height: v.videoHeight,
-                paused: v.paused,
-                currentTime: v.currentTime,
-                error: v.error ? v.error.message : null
+                ready: video.readyState,
+                width: video.videoWidth,
+                height: video.videoHeight,
+                paused: video.paused,
+                currentTime: video.currentTime
             };
-
         }"""
     )
 
 
-# ============================================================
-# OPEN YOUTUBE
-# ============================================================
-
-def open_youtube(page):
-
-    print(
-        "OPENING YOUTUBE:",
-        YOUTUBE_URL,
-        flush=True
-    )
+def start_video(page):
+    print("OPENING YOUTUBE:", YOUTUBE_URL, flush=True)
 
     page.goto(
         YOUTUBE_URL,
@@ -292,139 +115,36 @@ def open_youtube(page):
 
     page.wait_for_timeout(5000)
 
-    print(
-        "PAGE TITLE:",
-        page.title(),
-        flush=True
-    )
-
     reason = youtube_block_reason(page)
 
     if reason:
-
-        print(
-            "YOUTUBE ACCESS BLOCKED:",
-            reason,
-            flush=True
-        )
-
+        print("YOUTUBE ACCESS BLOCKED:", reason, flush=True)
         return False
 
-    print(
-        "YOUTUBE PAGE OPENED.",
-        flush=True
-    )
-
-    return True
-
-
-# ============================================================
-# START VIDEO
-# ============================================================
-
-def start_video(page):
-
-    for attempt in range(1, 4):
-
-        reason = youtube_block_reason(page)
-
-        if reason:
-
-            print(
-                "YOUTUBE ACCESS BLOCKED:",
-                reason,
-                flush=True
-            )
-
-            return False
-
-        state = get_video_state(page)
+    for attempt in range(1, 5):
+        state = video_state(page)
 
         print(
-            "PLAYBACK ATTEMPT:",
-            attempt,
-            "STATE:",
+            "VIDEO STATE:",
             state,
             flush=True
         )
 
-        if not state["found"]:
-
-            page.wait_for_timeout(5000)
-
-            continue
-
-        if (
-            state["ready"] >= 2
-            and state["width"] > 0
-            and state["height"] > 0
-            and not state["paused"]
-        ):
-
-            print(
-                "VIDEO PLAYBACK READY.",
-                flush=True
-            )
-
-            return True
-
-        try:
-
-            result = page.evaluate(
-                """async () => {
-
-                    const video =
-                        document.querySelector('video');
-
-                    if (!video) {
-                        return 'VIDEO_MISSING';
-                    }
-
-                    video.muted = true;
-
-                    try {
-
-                        await Promise.race([
-                            video.play(),
-
-                            new Promise((_, reject) =>
-                                setTimeout(
-                                    () => reject(
-                                        new Error('PLAY_TIMEOUT')
-                                    ),
-                                    8000
-                                )
-                            )
-                        ]);
-
-                        return 'PLAY_REQUEST_SUCCEEDED';
-
-                    } catch (error) {
-
-                        return String(error);
-
-                    }
-
-                }"""
-            )
-
-            print(
-                "PLAY RESULT:",
-                result,
-                flush=True
-            )
-
-        except Exception as error:
-
-            print(
-                "PLAY ERROR:",
-                str(error),
-                flush=True
-            )
+        if state["found"]:
+            try:
+                page.evaluate(
+                    """() => {
+                        const video = document.querySelector('video');
+                        video.muted = true;
+                        video.play().catch(() => {});
+                    }"""
+                )
+            except Exception as error:
+                print("PLAY REQUEST ERROR:", error, flush=True)
 
         page.wait_for_timeout(5000)
 
-        state = get_video_state(page)
+        state = video_state(page)
 
         if (
             state["found"]
@@ -433,86 +153,51 @@ def start_video(page):
             and state["height"] > 0
             and not state["paused"]
         ):
-
-            print(
-                "VIDEO PLAYBACK READY.",
-                flush=True
-            )
-
+            print("VIDEO PLAYBACK READY.", flush=True)
             return True
 
-    print(
-        "VIDEO PLAYBACK FAILED.",
-        flush=True
-    )
+        reason = youtube_block_reason(page)
 
+        if reason:
+            print("YOUTUBE ACCESS BLOCKED:", reason, flush=True)
+            return False
+
+    print("VIDEO PLAYBACK NOT READY.", flush=True)
     return False
 
 
-# ============================================================
-# CAPTURE VIDEO
-# ============================================================
+def capture_frame(page):
+    state = video_state(page)
 
-def capture_video(page):
-
-    state = get_video_state(page)
-
-    if not state["found"]:
-        return None
-
-    if (
-        state["ready"] < 2
-        or state["width"] <= 0
-        or state["height"] <= 0
-        or state["paused"]
+    if not (
+        state["found"]
+        and state["ready"] >= 2
+        and state["width"] > 0
+        and state["height"] > 0
+        and not state["paused"]
     ):
-
         return None
 
-    screenshot = page.locator(
-        "video"
-    ).first.screenshot(
+    screenshot = page.locator("video").first.screenshot(
         type="jpeg",
-        quality=95,
+        quality=90,
         timeout=15000
     )
 
-    image_array = np.frombuffer(
-        screenshot,
-        dtype=np.uint8
-    )
-
     frame = cv2.imdecode(
-        image_array,
+        np.frombuffer(screenshot, dtype=np.uint8),
         cv2.IMREAD_COLOR
     )
 
     if frame is not None:
-
-        store_frame(frame)
-
-        print(
-            "FRAME CAPTURED:",
-            frame.shape,
-            flush=True
-        )
+        print("FRAME CAPTURED:", frame.shape, flush=True)
 
     return frame
 
 
-# ============================================================
-# PROCESS SIGNAL
-# ============================================================
-
 def process_signal(signal):
-
     if not signal:
-
-        print(
-            "No signal detected.",
-            flush=True
-        )
-
+        print("No signal detected.", flush=True)
         return
 
     key = make_signal_key(signal)
@@ -521,58 +206,29 @@ def process_signal(signal):
         return
 
     if signal_already_sent(key):
-
-        print(
-            "Duplicate ignored:",
-            key,
-            flush=True
-        )
-
+        print("DUPLICATE IGNORED:", key, flush=True)
         return
 
-    message = format_message(signal)
+    print("SIGNAL DETECTED:", signal, flush=True)
 
-    sent = send_whatsapp(message)
-
-    if sent:
-
+    if send_whatsapp(format_message(signal)):
         set_last_signal(key)
-
-        print(
-            "WHATSAPP SENT:",
-            key,
-            flush=True
-        )
-
+        print("WHATSAPP SENT:", key, flush=True)
     else:
-
-        print(
-            "WHATSAPP FAILED.",
-            flush=True
-        )
+        print("WHATSAPP FAILED.", flush=True)
 
 
-# ============================================================
-# BROWSER SESSION
-# ============================================================
-
-def run_browser_session(playwright):
-
+def run_session(playwright):
     browser = None
 
     try:
-
-        print(
-            "LAUNCHING CHROMIUM...",
-            flush=True
-        )
+        print("LAUNCHING CHROMIUM...", flush=True)
 
         browser = playwright.chromium.launch(
             headless=True,
             args=[
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-gpu",
                 "--autoplay-policy=no-user-gesture-required"
             ]
         )
@@ -587,120 +243,75 @@ def run_browser_session(playwright):
 
         page = context.new_page()
 
-        page.set_default_timeout(15000)
-
-        if not open_youtube(page):
-
-            return BLOCKED_RETRY_SECONDS
-
         if not start_video(page):
+            return
 
-            if youtube_block_reason(page):
-
-                return BLOCKED_RETRY_SECONDS
-
-            return ERROR_RETRY_SECONDS
-
-        print(
-            "LIVE MONITOR ACTIVE.",
-            flush=True
-        )
+        print("LIVE MONITOR ACTIVE.", flush=True)
 
         failed_frames = 0
 
-        while True:
+        while browser.is_connected() and not page.is_closed():
+            try:
+                frame = capture_frame(page)
 
-            if not browser.is_connected():
+                if frame is None:
+                    failed_frames += 1
 
-                return ERROR_RETRY_SECONDS
+                    print(
+                        "FRAME NOT READY:",
+                        failed_frames,
+                        flush=True
+                    )
 
-            if page.is_closed():
+                    if failed_frames >= 6:
+                        print(
+                            "VIDEO STOPPED. REOPENING SESSION.",
+                            flush=True
+                        )
+                        return
 
-                return ERROR_RETRY_SECONDS
+                    time.sleep(CHECK_SECONDS)
+                    continue
 
-            reason = youtube_block_reason(page)
+                failed_frames = 0
 
-            if reason:
+                signal = detect_signal(frame)
+                process_signal(signal)
 
+            except Exception as error:
                 print(
-                    "YOUTUBE ACCESS LOST:",
-                    reason,
+                    "MONITOR LOOP ERROR:",
+                    type(error).__name__,
+                    str(error),
                     flush=True
                 )
-
-                return BLOCKED_RETRY_SECONDS
-
-            frame = capture_video(page)
-
-            if frame is None:
 
                 failed_frames += 1
 
-                print(
-                    "FRAME UNAVAILABLE:",
-                    failed_frames,
-                    flush=True
-                )
-
-                if failed_frames >= 3:
-
-                    return ERROR_RETRY_SECONDS
-
-                time.sleep(CHECK_SECONDS)
-
-                continue
-
-            failed_frames = 0
-
-            signal = detect_signal(frame)
-
-            process_signal(signal)
+                if failed_frames >= 6:
+                    return
 
             time.sleep(CHECK_SECONDS)
 
     finally:
-
-        print(
-            "CLOSING CHROMIUM...",
-            flush=True
-        )
-
         if browser is not None:
-
             try:
-
                 browser.close()
-
             except Exception:
-
                 pass
 
+        print("BROWSER SESSION CLOSED.", flush=True)
 
-# ============================================================
-# MAIN MONITOR
-# ============================================================
 
 def monitor():
-
-    print(
-        "MILLION MOVES MONITOR STARTED.",
-        flush=True
-    )
+    print("MILLION MOVES MONITOR STARTED.", flush=True)
 
     with sync_playwright() as playwright:
-
         while True:
-
-            retry_seconds = ERROR_RETRY_SECONDS
-
             try:
-
-                retry_seconds = run_browser_session(
-                    playwright
-                )
+                run_session(playwright)
 
             except Exception as error:
-
                 print(
                     "MONITOR ERROR:",
                     type(error).__name__,
@@ -709,19 +320,12 @@ def monitor():
                 )
 
             print(
-                "RETRYING IN",
-                retry_seconds,
-                "SECONDS...",
+                f"RETRYING IN {RETRY_SECONDS} SECONDS...",
                 flush=True
             )
 
-            time.sleep(retry_seconds)
+            time.sleep(RETRY_SECONDS)
 
-
-# ============================================================
-# START
-# ============================================================
 
 if __name__ == "__main__":
-
     monitor()
