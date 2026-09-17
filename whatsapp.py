@@ -4,14 +4,24 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "")
-WHATSAPP_API_VERSION = os.getenv("WHATSAPP_API_VERSION", "v23.0")
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "").strip()
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "").strip()
+WHATSAPP_TO = os.getenv("WHATSAPP_TO", "").strip().replace("+", "").replace(" ", "")
+WHATSAPP_API_VERSION = os.getenv("WHATSAPP_API_VERSION", "v23.0").strip()
 
 
 def send_whatsapp(message):
-    if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
-        print("WhatsApp credentials are not configured.")
+
+    if not WHATSAPP_TOKEN:
+        print("WHATSAPP ERROR: WHATSAPP_TOKEN is missing.", flush=True)
+        return False
+
+    if not PHONE_NUMBER_ID:
+        print("WHATSAPP ERROR: PHONE_NUMBER_ID is missing.", flush=True)
+        return False
+
+    if not WHATSAPP_TO:
+        print("WHATSAPP ERROR: WHATSAPP_TO is missing.", flush=True)
         return False
 
     url = (
@@ -27,10 +37,12 @@ def send_whatsapp(message):
 
     payload = {
         "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": WHATSAPP_TO,
         "type": "text",
         "text": {
             "preview_url": False,
-            "body": message
+            "body": str(message)
         }
     }
 
@@ -43,13 +55,23 @@ def send_whatsapp(message):
         )
 
         if response.ok:
-            print("WhatsApp message sent.")
+            print("WHATSAPP API ACCEPTED MESSAGE.", flush=True)
             return True
 
-        print("WhatsApp error:", response.status_code)
-        print(response.text)
+        print(
+            "WHATSAPP ERROR:",
+            response.status_code,
+            response.text,
+            flush=True
+        )
+
         return False
 
-    except Exception as e:
-        print("WhatsApp connection error:", e)
+    except requests.RequestException as error:
+        print(
+            "WHATSAPP CONNECTION ERROR:",
+            str(error),
+            flush=True
+        )
+
         return False
