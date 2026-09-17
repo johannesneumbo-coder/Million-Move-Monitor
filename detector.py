@@ -5,23 +5,16 @@ import re
 
 
 # ============================================================
-# MILLION MOVES V5 - XAUUSD SIGNAL DETECTOR
+# MILLION MOVES V5 - LIVE XAUUSD DETECTOR
 #
-# Yellow = Entry
-# Red = Stop Loss
-# Green = Take Profit
+# ENTRY: YELLOW
+# STOP LOSS: RED (OPTIONAL)
+# TARGETS: GREEN
 #
-# Returns:
-# {
-#     "direction": "BUY",
-#     "entry": 4300.00,
-#     "sl": 4290.00,
-#     "tp1": 4310.00,
-#     "tp2": 4320.00,
-#     "tp3": 4330.00
-# }
+# No invented prices.
+# No historical BUY/SELL marker detection.
 #
-# Returns None when a complete signal cannot be confirmed.
+# Duplicate prevention remains in main.py / storage.py.
 # ============================================================
 
 
@@ -36,28 +29,32 @@ def extract_prices(text):
 
     text = text.replace(" ", "")
 
-    patterns = re.findall(
-        r"\d{1,2},\d{3}\.\d{1,3}|\d{4,5}\.\d{1,3}",
-        text
+    pattern = (
+        r"(?<!\d)"
+        r"(?:\d{1,2},\d{3}|\d{4,5})"
+        r"\.\d{1,3}"
+        r"(?!\d)"
     )
 
-    values = []
+    matches = re.findall(pattern, text)
 
-    for value in patterns:
+    prices = []
+
+    for value in matches:
 
         try:
 
-            number = float(
+            price = float(
                 value.replace(",", "")
             )
 
-            if 1000 <= number <= 10000:
-                values.append(number)
+            if 1000 <= price <= 10000:
+                prices.append(price)
 
         except ValueError:
             continue
 
-    return values
+    return prices
 
 
 # ============================================================
@@ -102,6 +99,7 @@ def run_ocr(image, psm=7):
             )
 
         else:
+
             gray = image.copy()
 
         gray = cv2.resize(
@@ -110,12 +108,6 @@ def run_ocr(image, psm=7):
             fx=4,
             fy=4,
             interpolation=cv2.INTER_CUBIC
-        )
-
-        gray = cv2.GaussianBlur(
-            gray,
-            (3, 3),
-            0
         )
 
         _, threshold = cv2.threshold(
@@ -135,15 +127,13 @@ def run_ocr(image, psm=7):
 
             text = pytesseract.image_to_string(
                 processed,
-                config=(
-                    f"--psm {psm} "
-                    "-c tessedit_char_whitelist="
-                    "0123456789.,ABCDEFGHIJKLMNOPQRSTUVWXYZ:/ "
-                )
+                config=f"--psm {psm}"
             )
 
             if text:
-                results.append(text.upper().strip())
+                results.append(
+                    text.upper().strip()
+                )
 
         return " | ".join(results)
 
@@ -179,21 +169,21 @@ def create_color_mask(frame, color):
 
     elif color == "red":
 
-        red1 = cv2.inRange(
+        mask1 = cv2.inRange(
             hsv,
             np.array([0, 80, 60]),
             np.array([12, 255, 255])
         )
 
-        red2 = cv2.inRange(
+        mask2 = cv2.inRange(
             hsv,
             np.array([160, 80, 60]),
             np.array([180, 255, 255])
         )
 
         mask = cv2.bitwise_or(
-            red1,
-            red2
+            mask1,
+            mask2
         )
 
     elif color == "green":
@@ -223,14 +213,13 @@ def create_color_mask(frame, color):
 
 
 # ============================================================
-# FIND COLORED PRICE LABELS
+# FIND COLORED LABELS
 # ============================================================
 
 def find_color_labels(frame, color):
 
     height, width = frame.shape[:2]
 
-    # Focus on the right-hand TradingView labels.
     x1 = int(width * 0.65)
     x2 = int(width * 0.985)
 
@@ -280,17 +269,12 @@ def find_color_labels(frame, color):
         if w < 20 or h < 7:
             continue
 
-        if w > roi.shape[1] * 0.95:
-            continue
-
         if h > 90:
             continue
 
         real_x = x + x1
         real_y = y + y1
 
-        # Exclude labels entirely inside the far-right
-        # TradingView price scale.
         if real_x > width * 0.96:
             continue
 
@@ -312,9 +296,9 @@ def find_color_labels(frame, color):
         if not prices:
             continue
 
-        # Avoid treating multiple OCR variants as
-        # multiple separate price labels.
-        unique_prices = list(dict.fromkeys(prices))
+        unique_prices = list(
+            dict.fromkeys(prices)
+        )
 
         if len(unique_prices) != 1:
             continue
@@ -331,7 +315,6 @@ def find_color_labels(frame, color):
             }
         )
 
-    # Remove duplicate detections of the same label.
     unique = []
 
     for item in sorted(
@@ -343,21 +326,18 @@ def find_color_labels(frame, color):
 
         for existing in unique:
 
-            same_price = (
+            if (
                 abs(
                     item["price"] -
                     existing["price"]
                 ) < 0.01
-            )
-
-            same_position = (
+                and
                 abs(
                     item["y"] -
                     existing["y"]
                 ) < 20
-            )
+            ):
 
-            if same_price and same_position:
                 duplicate = True
                 break
 
@@ -368,7 +348,7 @@ def find_color_labels(frame, color):
 
 
 # ============================================================
-# ENTRY DETECTION
+# ENTRY
 # ============================================================
 
 def find_yellow_entry(frame):
@@ -378,17 +358,6 @@ def find_yellow_entry(frame):
         "yellow"
     )
 
-    if not labels:
-
-        print(
-            "ENTRY NOT DETECTED",
-            flush=True
-        )
-
-        return None
-
-    # Require an explicit entry label to avoid
-    # selecting unrelated yellow chart elements.
     candidates = [
         item
         for item in labels
@@ -398,7 +367,7 @@ def find_yellow_entry(frame):
     if not candidates:
 
         print(
-            "YELLOW LABEL FOUND BUT ENTRY NOT CONFIRMED",
+            "ENTRY NOT CONFIRMED",
             flush=True
         )
 
@@ -411,7 +380,7 @@ def find_yellow_entry(frame):
     selected = candidates[0]
 
     print(
-        "ENTRY:",
+        "ENTRY DETECTED:",
         selected["price"],
         flush=True
     )
@@ -423,7 +392,7 @@ def find_yellow_entry(frame):
 
 
 # ============================================================
-# STOP LOSS DETECTION
+# OPTIONAL STOP LOSS
 # ============================================================
 
 def find_red_stop_loss(frame):
@@ -437,17 +406,20 @@ def find_red_stop_loss(frame):
         item
         for item in labels
         if (
-            "SL" in item["text"]
-            or "S/L" in item["text"]
-            or "STOP" in item["text"]
+            "STOP" in item["text"]
             or "LOSS" in item["text"]
+            or "S/L" in item["text"]
+            or re.search(
+                r"\bSL\b",
+                item["text"]
+            )
         )
     ]
 
     if not candidates:
 
         print(
-            "STOP LOSS NOT DETECTED",
+            "STOP LOSS NOT CONFIRMED",
             flush=True
         )
 
@@ -459,12 +431,6 @@ def find_red_stop_loss(frame):
 
     selected = candidates[0]
 
-    print(
-        "STOP LOSS:",
-        selected["price"],
-        flush=True
-    )
-
     return {
         **selected,
         "sl": selected["price"]
@@ -472,7 +438,7 @@ def find_red_stop_loss(frame):
 
 
 # ============================================================
-# TAKE PROFIT DETECTION
+# TARGETS
 # ============================================================
 
 def find_green_targets(frame, entry):
@@ -491,7 +457,6 @@ def find_green_targets(frame, entry):
         if abs(price - entry) < 0.01:
             continue
 
-        # Require a TP label rather than any green price.
         if not re.search(
             r"\bT/?P\s*[123]?\b|TAKE\s*PROFIT",
             item["text"]
@@ -504,44 +469,41 @@ def find_green_targets(frame, entry):
 
 
 # ============================================================
-# DIRECTION
+# DETERMINE DIRECTION FROM TARGETS
 # ============================================================
 
-def determine_direction(entry, sl, targets):
+def determine_direction(entry, targets):
 
-    if sl < entry:
+    above = [
+        item
+        for item in targets
+        if item["price"] > entry
+    ]
 
-        direction = "BUY"
+    below = [
+        item
+        for item in targets
+        if item["price"] < entry
+    ]
 
-        valid = [
-            item
-            for item in targets
-            if item["price"] > entry
-        ]
+    # All three targets must be on the same side.
+    if len(above) >= 3 and len(below) == 0:
 
-        valid.sort(
+        above.sort(
             key=lambda item: item["price"]
         )
 
-    elif sl > entry:
+        return "BUY", above
 
-        direction = "SELL"
+    if len(below) >= 3 and len(above) == 0:
 
-        valid = [
-            item
-            for item in targets
-            if item["price"] < entry
-        ]
-
-        valid.sort(
+        below.sort(
             key=lambda item: -item["price"]
         )
 
-    else:
+        return "SELL", below
 
-        return None, []
-
-    return direction, valid
+    return None, []
 
 
 # ============================================================
@@ -556,21 +518,9 @@ def detect_signal(frame):
     )
 
     if frame is None:
-
-        print(
-            "EMPTY FRAME",
-            flush=True
-        )
-
         return None
 
     if not isinstance(frame, np.ndarray):
-
-        print(
-            "INVALID FRAME",
-            flush=True
-        )
-
         return None
 
     if frame.size == 0:
@@ -588,17 +538,6 @@ def detect_signal(frame):
     entry = entry_data["entry"]
 
     # --------------------------------------------------------
-    # STOP LOSS
-    # --------------------------------------------------------
-
-    sl_data = find_red_stop_loss(frame)
-
-    if sl_data is None:
-        return None
-
-    sl = sl_data["sl"]
-
-    # --------------------------------------------------------
     # TARGETS
     # --------------------------------------------------------
 
@@ -610,7 +549,7 @@ def detect_signal(frame):
     if not targets:
 
         print(
-            "NO TARGETS DETECTED",
+            "TARGETS NOT DETECTED",
             flush=True
         )
 
@@ -622,7 +561,6 @@ def detect_signal(frame):
 
     direction, valid_targets = determine_direction(
         entry,
-        sl,
         targets
     )
 
@@ -636,7 +574,7 @@ def detect_signal(frame):
         return None
 
     # --------------------------------------------------------
-    # REMOVE DUPLICATE TARGET PRICES
+    # UNIQUE TARGETS
     # --------------------------------------------------------
 
     unique_targets = []
@@ -652,7 +590,6 @@ def detect_signal(frame):
 
             unique_targets.append(price)
 
-    # Require all three targets.
     if len(unique_targets) < 3:
 
         print(
@@ -668,28 +605,49 @@ def detect_signal(frame):
     tp3 = unique_targets[2]
 
     # --------------------------------------------------------
-    # FINAL VALIDATION
+    # OPTIONAL STOP LOSS
+    # --------------------------------------------------------
+
+    sl_data = find_red_stop_loss(frame)
+
+    sl = None
+
+    if sl_data is not None:
+
+        candidate_sl = sl_data["sl"]
+
+        if direction == "BUY" and candidate_sl < entry:
+
+            sl = candidate_sl
+
+        elif direction == "SELL" and candidate_sl > entry:
+
+            sl = candidate_sl
+
+        else:
+
+            print(
+                "STOP LOSS PRICE INCONSISTENT",
+                flush=True
+            )
+
+    # --------------------------------------------------------
+    # VALIDATE PRICE ORDER
     # --------------------------------------------------------
 
     if direction == "BUY":
 
         valid = (
-            sl < entry < tp1 < tp2 < tp3
+            entry < tp1 < tp2 < tp3
         )
 
     else:
 
         valid = (
-            tp3 < tp2 < tp1 < entry < sl
+            tp3 < tp2 < tp1 < entry
         )
 
     if not valid:
-
-        print(
-            "INVALID SIGNAL PRICE ORDER",
-            flush=True
-        )
-
         return None
 
     # --------------------------------------------------------
@@ -699,7 +657,11 @@ def detect_signal(frame):
     signal = {
         "direction": direction,
         "entry": round(entry, 2),
-        "sl": round(sl, 2),
+        "sl": (
+            round(sl, 2)
+            if sl is not None
+            else None
+        ),
         "tp1": round(tp1, 2),
         "tp2": round(tp2, 2),
         "tp3": round(tp3, 2)
@@ -715,5 +677,5 @@ def detect_signal(frame):
 
 
 # ============================================================
-# END OF DETECTOR
+# END
 # ============================================================
