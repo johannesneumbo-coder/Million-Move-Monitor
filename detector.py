@@ -1,309 +1,239 @@
 import re
-from collections import defaultdict
 
 import cv2
+import numpy as np
 import pytesseract
 
 
-# ============================================================
-# MILLION MOVES DETECTOR
-# TEXT ONLY - NO COLOUR DETECTION
-# ============================================================
-
-PRICE_RE = re.compile(
-    r"(?<!\d)(\d{4,5}[.,]\d{2})(?!\d)"
+PRICE_PATTERN = re.compile(
+    r"(?<!\d)(\d{4,5}[.,]\d{1,3})(?!\d)"
 )
 
 
-def extract_price(text):
-    matches = PRICE_RE.findall(text)
+def log(message):
+    print(message, flush=True)
 
-    values = []
+
+def extract_price(text):
+    if not text:
+        return None
+
+    cleaned = text.replace(" ", "")
+
+    matches = PRICE_PATTERN.findall(
+        cleaned
+    )
 
     for match in matches:
         try:
-            value = round(
-                float(match.replace(",", ".")),
-                2
+            value = float(
+                match.replace(",", ".")
             )
 
             if 1000 <= value <= 10000:
-                values.append(value)
+                return round(value, 2)
 
         except ValueError:
             pass
 
-    values = list(dict.fromkeys(values))
-
-    if len(values) == 1:
-        return values[0]
-
     return None
 
 
-def identify_label(text):
-    text = text.upper()
+def preprocess(image):
+    if image is None or image.size == 0:
+        return None
 
-    text = text.replace("|", "1")
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
-
-    if re.search(
-        r"\bENTRY\b",
-        text
-    ):
-        return "entry"
-
-    if re.search(
-        r"\bSTOP\s*LOSS\b|\bSTOP\b|\bSL\b",
-        text
-    ):
-        return "sl"
-
-    for number in (1, 2, 3):
-        pattern = (
-            r"\bT\s*P\s*"
-            + str(number)
-            + r"\b"
-        )
-
-        if re.search(pattern, text):
-            return "tp" + str(number)
-
-    return None
-
-
-def prepare_images(frame):
-    height, width = frame.shape[:2]
-
-    # Only the right-hand label area.
-    x1 = int(width * 0.70)
-    x2 = int(width * 0.95)
-
-    crop = frame[:, x1:x2]
-
-    if crop.size == 0:
-        return []
-
-    gray = cv2.cvtColor(
-        crop,
-        cv2.COLOR_BGR2GRAY
-    )
-
-    gray = cv2.resize(
-        gray,
+    enlarged = cv2.resize(
+        image,
         None,
-        fx=4,
-        fy=4,
+        fx=3,
+        fy=3,
         interpolation=cv2.INTER_CUBIC
     )
 
-    _, binary = cv2.threshold(
-        gray,
-        0,
-        255,
-        cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    gray = cv2.cvtColor(
+        enlarged,
+        cv2.COLOR_BGR2GRAY
     )
 
-    return [
+    gray = cv2.GaussianBlur(
         gray,
-        binary,
-        cv2.bitwise_not(binary)
-    ]
+        (3, 3),
+        0
+    )
+
+    return cv2.convertScaleAbs(
+        gray,
+        alpha=1.7,
+        beta=10
+    )
 
 
-def read_ocr_lines(image):
+def read_text(image, config=None):
+    processed = preprocess(
+        image
+    )
+
+    if processed is None:
+        return ""
+
+    if config is None:
+        config = (
+            "--oem 3 --psm 11"
+        )
+
     try:
-        data = pytesseract.image_to_data(
-            image,
-            config="--psm 11",
-            output_type=pytesseract.Output.DICT
+        return pytesseract.image_to_string(
+            processed,
+            config=config
         )
 
     except Exception as error:
-        print(
-            "OCR ERROR:",
-            error,
-            flush=True
+        log(
+            "OCR ERROR: "
+            f"{type(error).__name__}: {error}"
         )
 
-        return []
+        return ""
 
-    groups = defaultdict(list)
 
-    for index, word in enumerate(data["text"]):
-        word = word.strip()
+def normalize_line(line):
+    line = line.upper()
 
-        if not word:
+    line = line.replace(
+        "TAKE PROFIT",
+        "TP"
+    )
+
+    line = line.replace(
+        "STOP LOSS",
+        "SL"
+    )
+
+    line = line.replace(
+        "S/L",
+        "SL"
+    )
+
+    line = line.replace(
+        "T/P",
+        "TP"
+    )
+
+    return line.strip()
+
+
+def find_labeled_price(lines, labels):
+    for index, original in enumerate(lines):
+
+        line = normalize_line(
+            original
+        )
+
+        if not any(
+            re.search(label, line)
+            for label in labels
+        ):
             continue
 
-        key = (
-            data["block_num"][index],
-            data["par_num"][index],
-            data["line_num"][index]
+        price = extract_price(
+            line
         )
 
-        groups[key].append(
-            (
-                data["left"][index],
-                data["top"][index],
-                word
-            )
-        )
+        if price is not None:
+            return price
 
-    lines = []
+        # OCR sometimes separates a label and
+        # its price onto consecutive lines.
+        if index + 1 < len(lines):
 
-    for words in groups.values():
-        words.sort(key=lambda item: item[0])
-
-        text = " ".join(
-            item[2]
-            for item in words
-        )
-
-        y = min(
-            item[1]
-            for item in words
-        )
-
-        lines.append((y, text))
-
-    lines.sort(key=lambda item: item[0])
-
-    return lines
-
-
-def read_labels(frame):
-    images = prepare_images(frame)
-
-    observations = defaultdict(list)
-
-    for image in images:
-        lines = read_ocr_lines(image)
-
-        for _, text in lines:
-            label = identify_label(text)
-
-            if label is None:
-                continue
-
-            price = extract_price(text)
-
-            if price is None:
-                continue
-
-            observations[label].append(price)
-
-    confirmed = {}
-
-    for label, prices in observations.items():
-        unique = set(prices)
-
-        if len(unique) == 1:
-            confirmed[label] = prices[0]
-
-        else:
-            print(
-                "CONFLICTING OCR:",
-                label,
-                prices,
-                flush=True
+            next_line = normalize_line(
+                lines[index + 1]
             )
 
-    print(
-        "TEXT LABELS:",
-        confirmed,
-        flush=True
-    )
+            price = extract_price(
+                next_line
+            )
 
-    return confirmed
+            if price is not None:
+                return price
+
+    return None
 
 
-def detect_signal(frame):
-    if frame is None:
-        print(
-            "EMPTY FRAME",
-            flush=True
+def detect_direction(lines):
+    for line in lines:
+
+        normalized = normalize_line(
+            line
         )
-        return None
 
-    if frame.size == 0:
-        print(
-            "EMPTY FRAME",
-            flush=True
-        )
-        return None
+        if re.search(
+            r"\bBUY\b",
+            normalized
+        ):
+            return "BUY"
 
-    print(
-        "DETECTOR FRAME:",
-        frame.shape,
-        flush=True
-    )
+        if re.search(
+            r"\bSELL\b",
+            normalized
+        ):
+            return "SELL"
 
-    labels = read_labels(frame)
+    return None
 
-    required = [
-        "entry",
-        "tp1",
-        "tp2",
-        "tp3"
+
+def read_signal_text(text):
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
     ]
 
-    missing = [
-        name
-        for name in required
-        if name not in labels
-    ]
+    direction = detect_direction(
+        lines
+    )
 
-    if missing:
-        print(
-            "MISSING LABELS:",
-            missing,
-            flush=True
-        )
-        return None
+    entry = find_labeled_price(
+        lines,
+        [
+            r"\bENTRY\b",
+            r"\bENT\b"
+        ]
+    )
 
-    entry = labels["entry"]
-    tp1 = labels["tp1"]
-    tp2 = labels["tp2"]
-    tp3 = labels["tp3"]
+    sl = find_labeled_price(
+        lines,
+        [
+            r"\bSL\b"
+        ]
+    )
 
-    if entry < tp1 < tp2 < tp3:
-        direction = "BUY"
+    tp1 = find_labeled_price(
+        lines,
+        [
+            r"\bTP\s*1\b",
+            r"\bTP1\b"
+        ]
+    )
 
-    elif entry > tp1 > tp2 > tp3:
-        direction = "SELL"
+    tp2 = find_labeled_price(
+        lines,
+        [
+            r"\bTP\s*2\b",
+            r"\bTP2\b"
+        ]
+    )
 
-    else:
-        print(
-            "INVALID TARGET ORDER:",
-            labels,
-            flush=True
-        )
-        return None
+    tp3 = find_labeled_price(
+        lines,
+        [
+            r"\bTP\s*3\b",
+            r"\bTP3\b"
+        ]
+    )
 
-    sl = labels.get("sl")
-
-    if sl is not None:
-        if direction == "BUY" and sl >= entry:
-            print(
-                "INVALID BUY STOP LOSS",
-                flush=True
-            )
-            return None
-
-        if direction == "SELL" and sl <= entry:
-            print(
-                "INVALID SELL STOP LOSS",
-                flush=True
-            )
-            return None
-
-    signal = {
+    return {
         "direction": direction,
         "entry": entry,
         "sl": sl,
@@ -312,10 +242,190 @@ def detect_signal(frame):
         "tp3": tp3
     }
 
-    print(
-        "SIGNAL DETECTED:",
-        signal,
-        flush=True
+
+def validate_signal(signal):
+    required = (
+        "direction",
+        "entry",
+        "sl",
+        "tp1",
+        "tp2",
+        "tp3"
     )
 
-    return signal
+    if any(
+        signal.get(key) is None
+        for key in required
+    ):
+        return False
+
+    direction = signal["direction"]
+
+    entry = signal["entry"]
+    sl = signal["sl"]
+
+    tp1 = signal["tp1"]
+    tp2 = signal["tp2"]
+    tp3 = signal["tp3"]
+
+    if direction == "BUY":
+        return (
+            sl < entry
+            and entry < tp1
+            and tp1 < tp2
+            and tp2 < tp3
+        )
+
+    if direction == "SELL":
+        return (
+            sl > entry
+            and entry > tp1
+            and tp1 > tp2
+            and tp2 > tp3
+        )
+
+    return False
+
+
+def get_right_side(frame):
+    height, width = frame.shape[:2]
+
+    # Exclude the historical signals
+    # displayed in the chart's center.
+    x1 = int(
+        width * 0.65
+    )
+
+    return frame[
+        0:height,
+        x1:width
+    ]
+
+
+def detect_signal(frame):
+    if frame is None:
+        log("DETECTOR: EMPTY FRAME")
+        return None
+
+    if not isinstance(
+        frame,
+        np.ndarray
+    ):
+        log("DETECTOR: INVALID FRAME")
+        return None
+
+    if frame.size == 0:
+        log("DETECTOR: ZERO-SIZE FRAME")
+        return None
+
+    log(
+        f"DETECTOR FRAME: {frame.shape}"
+    )
+
+    right_side = get_right_side(
+        frame
+    )
+
+    # First OCR pass: automatic sparse text.
+    text = read_text(
+        right_side,
+        "--oem 3 --psm 11"
+    )
+
+    signal = read_signal_text(
+        text
+    )
+
+    if validate_signal(signal):
+        log(
+            f"COMPLETE SIGNAL: {signal}"
+        )
+
+        return signal
+
+    # Second OCR pass: alternative segmentation.
+    alternate_text = read_text(
+        right_side,
+        "--oem 3 --psm 6"
+    )
+
+    alternate_signal = read_signal_text(
+        alternate_text
+    )
+
+    if validate_signal(
+        alternate_signal
+    ):
+        log(
+            "COMPLETE SIGNAL FROM "
+            "ALTERNATIVE OCR"
+        )
+
+        return alternate_signal
+
+    # Combine only matching values.
+    # Never replace one conflicting price
+    # with another guessed price.
+    combined = {}
+
+    for key in (
+        "direction",
+        "entry",
+        "sl",
+        "tp1",
+        "tp2",
+        "tp3"
+    ):
+        first = signal.get(key)
+
+        second = alternate_signal.get(key)
+
+        if first is None:
+            combined[key] = second
+
+        elif second is None:
+            combined[key] = first
+
+        elif first == second:
+            combined[key] = first
+
+        else:
+            log(
+                f"CONFLICTING OCR FOR {key}: "
+                f"{first} / {second}"
+            )
+
+            combined[key] = None
+
+    if validate_signal(
+        combined
+    ):
+        log(
+            f"COMPLETE SIGNAL: {combined}"
+        )
+
+        return combined
+
+    missing = [
+        key
+        for key in (
+            "direction",
+            "entry",
+            "sl",
+            "tp1",
+            "tp2",
+            "tp3"
+        )
+        if combined.get(key) is None
+    ]
+
+    log(
+        f"INCOMPLETE SIGNAL. "
+        f"MISSING OR UNCERTAIN: {missing}"
+    )
+
+    log(
+        f"OCR VALUES: {combined}"
+    )
+
+    return None
