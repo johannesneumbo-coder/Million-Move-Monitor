@@ -27,6 +27,8 @@ CHECK_SECONDS = max(
 
 RESTART_SECONDS = 10
 
+MAX_PLAYBACK_ATTEMPTS = 3
+
 VIEWPORT_WIDTH = 1280
 VIEWPORT_HEIGHT = 720
 
@@ -50,9 +52,7 @@ def make_signal_key(signal):
         return None
 
     try:
-
         entry = round(float(entry), 2)
-
     except (TypeError, ValueError):
         return None
 
@@ -60,7 +60,7 @@ def make_signal_key(signal):
 
 
 # ============================================================
-# PRICE FORMATTING
+# FORMAT PRICES
 # ============================================================
 
 def price_text(value):
@@ -69,9 +69,7 @@ def price_text(value):
         return "Not confirmed"
 
     try:
-
         return f"{float(value):.2f}"
-
     except (TypeError, ValueError):
         return "Not confirmed"
 
@@ -84,11 +82,7 @@ def format_message(signal):
 
     direction = signal["direction"]
 
-    emoji = (
-        "🟢"
-        if direction == "BUY"
-        else "🔴"
-    )
+    emoji = "🟢" if direction == "BUY" else "🔴"
 
     return (
         f"{emoji} MILLION MOVES V5 SIGNAL\n\n"
@@ -104,13 +98,89 @@ def format_message(signal):
 
 
 # ============================================================
-# START VIDEO
+# VIDEO STATE
 # ============================================================
 
-def start_video(page):
+def get_video_state(page):
+
+    return page.evaluate(
+        """() => {
+            const v = document.querySelector('video');
+
+            if (!v) {
+                return {
+                    found: false,
+                    error: 'Video element missing'
+                };
+            }
+
+            const e = v.error;
+
+            return {
+                found: true,
+                ready: v.readyState,
+                network: v.networkState,
+                width: v.videoWidth,
+                height: v.videoHeight,
+                paused: v.paused,
+                currentTime: v.currentTime,
+                error: e ? {
+                    code: e.code,
+                    message: e.message
+                } : null
+            };
+        }"""
+    )
+
+
+# ============================================================
+# REQUEST VIDEO PLAYBACK
+# ============================================================
+
+def request_playback(page):
+
+    return page.evaluate(
+        """async () => {
+            const v = document.querySelector('video');
+
+            if (!v) {
+                return 'VIDEO_MISSING';
+            }
+
+            v.muted = true;
+            v.autoplay = true;
+
+            try {
+                await Promise.race([
+                    v.play(),
+                    new Promise((_, reject) =>
+                        setTimeout(
+                            () => reject(
+                                new Error('PLAY_TIMEOUT')
+                            ),
+                            8000
+                        )
+                    )
+                ]);
+
+                return 'PLAY_REQUEST_SUCCEEDED';
+
+            } catch (e) {
+                return String(e);
+            }
+        }"""
+    )
+
+
+# ============================================================
+# OPEN YOUTUBE
+# ============================================================
+
+def open_youtube(page):
 
     print(
-        "Opening YouTube...",
+        "Opening YouTube:",
+        YOUTUBE_URL,
         flush=True
     )
 
@@ -123,110 +193,168 @@ def start_video(page):
     page.wait_for_timeout(5000)
 
     # Cookie consent
+    for name in [
+        "Accept all",
+        "I agree"
+    ]:
+
+        try:
+
+            page.get_by_role(
+                "button",
+                name=name,
+                exact=True
+            ).click(timeout=2000)
+
+            break
+
+        except Exception:
+            pass
+
+    # Skip advertisements when possible
     try:
 
-        page.get_by_role(
-            "button",
-            name="Accept all"
-        ).click(timeout=2000)
+        page.locator(
+            ".ytp-ad-skip-button, "
+            ".ytp-skip-ad-button"
+        ).first.click(timeout=2000)
 
     except Exception:
         pass
-
-    # YouTube skip button
-    try:
-
-        page.get_by_role(
-            "button",
-            name="Skip"
-        ).click(timeout=2000)
-
-    except Exception:
-        pass
-
-    video = page.locator("video").first
-
-    video.wait_for(
-        state="attached",
-        timeout=30000
-    )
-
-    try:
-
-        video.evaluate(
-            """video => {
-                video.muted = true;
-                video.play().catch(() => {});
-            }"""
-        )
-
-    except Exception as error:
-
-        print(
-            "Video playback request:",
-            str(error),
-            flush=True
-        )
-
-    page.wait_for_timeout(5000)
 
     print(
-        "YouTube video initialized.",
+        "YouTube page loaded.",
         flush=True
     )
 
 
 # ============================================================
-# CAPTURE VIDEO
+# ENSURE VIDEO PLAYBACK
+# ============================================================
+
+def ensure_video_playing(page):
+
+    for attempt in range(
+        1,
+        MAX_PLAYBACK_ATTEMPTS + 1
+    ):
+
+        print(
+            "PLAYBACK ATTEMPT:",
+            attempt,
+            flush=True
+        )
+
+        state = get_video_state(page)
+
+        print(
+            "VIDEO STATE:",
+            state,
+            flush=True
+        )
+
+        if not state.get("found"):
+
+            page.wait_for_timeout(5000)
+            continue
+
+        if state.get("error"):
+
+            print(
+                "VIDEO ERROR:",
+                state["error"],
+                flush=True
+            )
+
+        # Request playback
+        result = request_playback(page)
+
+        print(
+            "PLAY RESULT:",
+            result,
+            flush=True
+        )
+
+        page.wait_for_timeout(5000)
+
+        state = get_video_state(page)
+
+        print(
+            "VIDEO STATE AFTER PLAY:",
+            state,
+            flush=True
+        )
+
+        if (
+            state.get("ready", 0) >= 2
+            and state.get("width", 0) > 0
+            and state.get("height", 0) > 0
+            and not state.get("paused", True)
+        ):
+
+            print(
+                "VIDEO PLAYBACK READY.",
+                flush=True
+            )
+
+            return True
+
+        # Try clicking YouTube's play button
+        try:
+
+            page.locator(
+                ".ytp-play-button"
+            ).first.click(timeout=3000)
+
+        except Exception:
+            pass
+
+        page.wait_for_timeout(3000)
+
+    print(
+        "VIDEO PLAYBACK FAILED.",
+        flush=True
+    )
+
+    return False
+
+
+# ============================================================
+# CAPTURE VIDEO FRAME
 # ============================================================
 
 def capture_video(page):
 
-    video = page.locator("video").first
-
-    # Check that the video exists.
-    if video.count() == 0:
-
-        print(
-            "Video element missing.",
-            flush=True
-        )
-
-        return None
-
-    # Confirm that actual video frames are available.
-    state = video.evaluate(
-        """video => ({
-            ready: video.readyState,
-            width: video.videoWidth,
-            height: video.videoHeight,
-            paused: video.paused
-        })"""
-    )
+    state = get_video_state(page)
 
     print(
-        "VIDEO STATE:",
+        "CAPTURE STATE:",
         state,
         flush=True
     )
 
+    if not state.get("found"):
+        return None
+
     if (
-        state["ready"] < 2
-        or state["width"] == 0
-        or state["height"] == 0
+        state.get("ready", 0) < 2
+        or state.get("width", 0) == 0
+        or state.get("height", 0) == 0
+        or state.get("paused", True)
     ):
 
         print(
-            "Video frame not ready.",
+            "VIDEO NOT READY FOR CAPTURE.",
             flush=True
         )
 
         return None
 
-    # Screenshot only the video, not the entire page.
+    video = page.locator("video").first
+
     screenshot = video.screenshot(
         type="jpeg",
-        quality=80,
+        quality=85,
         timeout=15000,
         animations="disabled"
     )
@@ -244,14 +372,14 @@ def capture_video(page):
     if frame is None:
 
         print(
-            "Screenshot decoding failed.",
+            "FRAME DECODE FAILED.",
             flush=True
         )
 
         return None
 
     print(
-        "Video frame captured:",
+        "FRAME CAPTURED:",
         frame.shape,
         flush=True
     )
@@ -280,11 +408,9 @@ def process_signal(signal):
         flush=True
     )
 
-    signal_key = make_signal_key(
-        signal
-    )
+    key = make_signal_key(signal)
 
-    if signal_key is None:
+    if key is None:
 
         print(
             "Invalid signal key.",
@@ -293,45 +419,40 @@ def process_signal(signal):
 
         return
 
-    if signal_already_sent(signal_key):
+    if signal_already_sent(key):
 
         print(
             "Duplicate signal ignored:",
-            signal_key,
+            key,
             flush=True
         )
 
         return
 
-    message = format_message(
-        signal
-    )
+    message = format_message(signal)
 
     print(
         "Sending WhatsApp:",
-        signal_key,
+        key,
         flush=True
     )
 
-    sent = send_whatsapp(
-        message
-    )
+    sent = send_whatsapp(message)
 
     if sent:
 
-        set_last_signal(
-            signal_key
-        )
+        set_last_signal(key)
 
         print(
-            "WhatsApp sent. Signal saved.",
+            "WHATSAPP SENT:",
+            key,
             flush=True
         )
 
     else:
 
         print(
-            "WhatsApp failed. Signal not saved.",
+            "WHATSAPP FAILED.",
             flush=True
         )
 
@@ -357,9 +478,6 @@ def run_browser_session(playwright):
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
-                "--disable-extensions",
-                "--disable-background-networking",
-                "--disable-renderer-backgrounding",
                 "--no-first-run",
                 "--autoplay-policy=no-user-gesture-required"
             ]
@@ -370,124 +488,100 @@ def run_browser_session(playwright):
                 "width": VIEWPORT_WIDTH,
                 "height": VIEWPORT_HEIGHT
             },
-            device_scale_factor=1,
-            reduced_motion="reduce"
+            device_scale_factor=1
         )
 
         page = context.new_page()
 
-        page.set_default_timeout(
-            15000
+        page.set_default_timeout(15000)
+
+        # Log page errors for troubleshooting
+        page.on(
+            "pageerror",
+            lambda error: print(
+                "PAGE ERROR:",
+                str(error),
+                flush=True
+            )
         )
 
-        # Avoid loading unnecessary images and fonts.
-        # Do not block YouTube scripts or video resources.
-        def block_resources(route):
-
-            resource_type = route.request.resource_type
-
-            if resource_type in (
-                "image",
-                "font"
-            ):
-
-                route.abort()
-
-            else:
-
-                route.continue_()
-
-        page.route(
-            "**/*",
-            block_resources
+        page.on(
+            "crash",
+            lambda _: print(
+                "CHROMIUM PAGE CRASHED.",
+                flush=True
+            )
         )
 
-        start_video(
-            page
-        )
+        open_youtube(page)
+
+        if not ensure_video_playing(page):
+
+            raise RuntimeError(
+                "YouTube video failed to start."
+            )
 
         print(
-            "Browser monitoring active.",
+            "LIVE MONITOR ACTIVE.",
             flush=True
         )
+
+        failed_frames = 0
 
         while True:
 
             if not browser.is_connected():
 
                 raise RuntimeError(
-                    "Chromium disconnected."
+                    "Browser disconnected."
                 )
 
             if page.is_closed():
 
                 raise RuntimeError(
-                    "YouTube page closed."
+                    "Browser page closed."
                 )
 
-            try:
+            frame = capture_video(page)
+
+            if frame is None:
+
+                failed_frames += 1
 
                 print(
-                    "Capturing live video...",
+                    "FAILED FRAMES:",
+                    failed_frames,
                     flush=True
                 )
 
-                frame = capture_video(
-                    page
-                )
+                if failed_frames >= 3:
 
-                if frame is not None:
-
-                    print(
-                        "Running detector...",
-                        flush=True
+                    raise RuntimeError(
+                        "Video stopped producing frames."
                     )
 
-                    signal = detect_signal(
-                        frame
-                    )
+                time.sleep(CHECK_SECONDS)
+                continue
 
-                    process_signal(
-                        signal
-                    )
+            failed_frames = 0
 
-                else:
+            signal = detect_signal(frame)
 
-                    print(
-                        "No usable video frame.",
-                        flush=True
-                    )
+            process_signal(signal)
 
-            except Exception as error:
-
-                print(
-                    "BROWSER ERROR:",
-                    type(error).__name__,
-                    str(error),
-                    flush=True
-                )
-
-                # A crashed screenshot target should
-                # restart the browser, not loop forever.
-                raise
-
-            time.sleep(
-                CHECK_SECONDS
-            )
+            time.sleep(CHECK_SECONDS)
 
     finally:
 
         print(
-            "Closing browser session...",
+            "Closing Chromium...",
             flush=True
         )
 
         if browser is not None:
 
             try:
-
                 browser.close()
-
             except Exception:
                 pass
 
@@ -500,12 +594,6 @@ def monitor():
 
     print(
         "Million Moves monitor started.",
-        flush=True
-    )
-
-    print(
-        "YouTube URL:",
-        YOUTUBE_URL,
         flush=True
     )
 
@@ -522,7 +610,7 @@ def monitor():
             except Exception as error:
 
                 print(
-                    "Browser session failed:",
+                    "MONITOR ERROR:",
                     type(error).__name__,
                     str(error),
                     flush=True
@@ -535,13 +623,11 @@ def monitor():
                 flush=True
             )
 
-            time.sleep(
-                RESTART_SECONDS
-            )
+            time.sleep(RESTART_SECONDS)
 
 
 # ============================================================
-# DIRECT START
+# START
 # ============================================================
 
 if __name__ == "__main__":
