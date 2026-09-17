@@ -3,7 +3,6 @@ import time
 from pathlib import Path
 
 import cv2
-import numpy as np
 from playwright.sync_api import sync_playwright
 
 from detector import detect_signal
@@ -17,11 +16,9 @@ YOUTUBE_URL = os.getenv(
 )
 
 CHECK_SECONDS = max(
-    3,
+    2,
     int(os.getenv("CHECK_SECONDS", "5"))
 )
-
-RETRY_SECONDS = 60
 
 SCREENSHOT_FILE = Path(
     os.getenv(
@@ -30,397 +27,241 @@ SCREENSHOT_FILE = Path(
     )
 )
 
+SCREENSHOT_FILE.parent.mkdir(
+    parents=True,
+    exist_ok=True
+)
 
-def log(*args):
-    print(*args, flush=True)
+
+def log(message):
+    print(message, flush=True)
 
 
 def make_signal_key(signal):
     direction = str(
         signal.get("direction", "")
-    ).upper()
+    ).strip().upper()
 
     if direction not in ("BUY", "SELL"):
         return None
 
+    entry = signal.get("entry")
+
+    if entry is None:
+        return None
+
     try:
-        entry = float(signal["entry"])
-    except (KeyError, ValueError, TypeError):
+        entry = round(float(entry), 2)
+    except (TypeError, ValueError):
         return None
 
     return f"{direction}|{entry:.2f}"
 
 
-def format_message(signal):
+def format_signal(signal):
+    direction = str(
+        signal.get("direction", "")
+    ).upper()
+
     lines = [
-        "MILLION MOVES XAUUSD",
-        f"Signal: {signal['direction']}",
-        f"Entry: {signal['entry']}"
+        "LIVE XAUUSD SIGNAL",
+        f"Direction: {direction}",
+        f"Entry: {signal.get('entry')}"
     ]
 
-    for name in ("sl", "tp1", "tp2", "tp3"):
-        value = signal.get(name)
+    for key, label in (
+        ("sl", "SL"),
+        ("tp1", "TP1"),
+        ("tp2", "TP2"),
+        ("tp3", "TP3")
+    ):
+        value = signal.get(key)
 
         if value is not None:
-            lines.append(
-                f"{name.upper()}: {value}"
-            )
+            lines.append(f"{label}: {value}")
 
     return "\n".join(lines)
 
 
-def check_youtube(page):
+def open_video(browser):
+    context = browser.new_context(
+        viewport={
+            "width": 1920,
+            "height": 1080
+        },
+        device_scale_factor=1
+    )
+
+    page = context.new_page()
+
+    log("OPENING YOUTUBE")
+
+    page.goto(
+        YOUTUBE_URL,
+        wait_until="domcontentloaded",
+        timeout=60000
+    )
+
+    page.wait_for_timeout(8000)
+
     try:
-        text = page.locator("body").inner_text(
-            timeout=3000
-        ).lower()
-
-        if (
-            "sign in to confirm" in text
-            or "unusual traffic" in text
-            or "not a bot" in text
-        ):
-            log(
-                "YOUTUBE ACCESS BLOCKED: "
-                "Sign-in verification required"
-            )
-            return False
-
+        page.locator(
+            "button:has-text('Accept all')"
+        ).first.click(timeout=2000)
     except Exception:
         pass
 
-    return True
+    video = page.locator("video").first
 
-
-def get_video_state(page):
-    try:
-        return page.evaluate(
-            """() => {
-                const v = document.querySelector('video');
-
-                if (!v) {
-                    return null;
-                }
-
-                return {
-                    ready: v.readyState,
-                    width: v.videoWidth,
-                    height: v.videoHeight,
-                    paused: v.paused,
-                    currentTime: v.currentTime
-                };
-            }"""
-        )
-
-    except Exception as error:
-        log("VIDEO STATE ERROR:", error)
-        return None
-
-
-def open_youtube(page):
-    log("OPENING YOUTUBE")
-
-    try:
-        page.goto(
-            YOUTUBE_URL,
-            wait_until="domcontentloaded",
-            timeout=45000
-        )
-
-    except Exception as error:
-        log(
-            "PAGE LOAD ERROR:",
-            str(error)[:250]
-        )
-
-    deadline = time.monotonic() + 45
-
-    while time.monotonic() < deadline:
-
-        if not check_youtube(page):
-            return False
-
-        state = get_video_state(page)
-
-        if state is None:
-            log("WAITING FOR VIDEO ELEMENT")
-
-            time.sleep(3)
-            continue
-
-        try:
-            page.evaluate(
-                """() => {
-                    const v = document.querySelector('video');
-
-                    if (v && v.paused) {
-                        v.play().catch(() => {});
-                    }
-                }"""
-            )
-
-        except Exception as error:
-            log(
-                "PLAY ATTEMPT ERROR:",
-                str(error)[:150]
-            )
-
-        state = get_video_state(page)
-
-        if state is not None:
-
-            if (
-                state["ready"] >= 2
-                and state["width"] > 0
-                and state["height"] > 0
-                and not state["paused"]
-            ):
-                log(
-                    "VIDEO READY:",
-                    state
-                )
-
-                return True
-
-        time.sleep(3)
-
-    log(
-        "VIDEO DID NOT BECOME PLAYABLE"
+    video.wait_for(
+        state="attached",
+        timeout=45000
     )
 
-    return False
-
-
-def capture_frame(page):
     try:
-        video = page.locator("video").first
+        video.evaluate(
+            """
+            video => {
+                video.muted = true;
+                video.play().catch(() => {});
+            }
+            """
+        )
+    except Exception:
+        pass
 
-        if video.count() == 0:
-            log("VIDEO ELEMENT MISSING")
-            return None
+    log("VIDEO ELEMENT FOUND")
 
-        state = get_video_state(page)
+    return context, page, video
 
-        if (
-            state is None
-            or state["ready"] < 2
-            or state["width"] == 0
-            or state["height"] == 0
-        ):
-            log(
-                "VIDEO FRAME NOT READY:",
-                state
-            )
 
-            return None
+def capture_frame(video):
+    video.screenshot(
+        path=str(SCREENSHOT_FILE),
+        timeout=20000
+    )
 
-        screenshot = video.screenshot(
-            timeout=10000
+    frame = cv2.imread(
+        str(SCREENSHOT_FILE)
+    )
+
+    if frame is None:
+        raise RuntimeError(
+            "Screenshot could not be read"
         )
 
-        SCREENSHOT_FILE.parent.mkdir(
-            parents=True,
-            exist_ok=True
-        )
+    log(
+        f"FRAME CAPTURED: {frame.shape}"
+    )
 
-        SCREENSHOT_FILE.write_bytes(
-            screenshot
-        )
-
-        image = np.frombuffer(
-            screenshot,
-            dtype=np.uint8
-        )
-
-        frame = cv2.imdecode(
-            image,
-            cv2.IMREAD_COLOR
-        )
-
-        if frame is None:
-            log("FRAME DECODE FAILED")
-            return None
-
-        log(
-            "FRAME CAPTURED:",
-            frame.shape
-        )
-
-        return frame
-
-    except Exception as error:
-        log(
-            "CAPTURE ERROR:",
-            str(error)[:250]
-        )
-
-        return None
+    return frame
 
 
 def process_frame(frame):
-    try:
-        signal = detect_signal(frame)
+    log("RUNNING SIGNAL DETECTOR")
 
-    except Exception as error:
-        log(
-            "DETECTOR ERROR:",
-            error
-        )
-
-        return
+    signal = detect_signal(frame)
 
     if not signal:
-        log("No signal detected")
+        log("NO SIGNAL DETECTED")
+        return
+
+    if not isinstance(signal, dict):
+        log("INVALID DETECTOR RESULT")
         return
 
     key = make_signal_key(signal)
 
     if key is None:
-        log("INVALID SIGNAL")
+        log("SIGNAL HAS NO VALID DIRECTION OR ENTRY")
         return
+
+    log(f"SIGNAL DETECTED: {key}")
 
     if signal_already_sent(key):
-        log(
-            "DUPLICATE SIGNAL SKIPPED:",
-            key
-        )
-
+        log("DUPLICATE SIGNAL - NOT SENDING")
         return
 
-    message = format_message(signal)
+    message = format_signal(signal)
 
-    try:
-        sent = send_whatsapp(message)
+    log("SENDING WHATSAPP MESSAGE")
 
-    except Exception as error:
-        log(
-            "WHATSAPP ERROR:",
-            error
-        )
+    result = send_whatsapp(message)
 
+    if result is False:
+        log("WHATSAPP SEND FAILED")
         return
 
-    if sent:
-        set_last_signal(key)
+    set_last_signal(key)
 
-        log(
-            "WHATSAPP SIGNAL SENT:",
-            key
-        )
-
-    else:
-        log(
-            "WHATSAPP SEND FAILED"
-        )
+    log("SIGNAL SENT AND SAVED")
 
 
 def monitor_loop():
-    log(
-        "MILLION MOVES MONITOR STARTED"
-    )
+    log("MONITOR STARTED")
 
     while True:
+        context = None
 
         try:
             with sync_playwright() as playwright:
-
-                browser = None
+                browser = playwright.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--autoplay-policy=no-user-gesture-required"
+                    ]
+                )
 
                 try:
-                    log("LAUNCHING CHROMIUM")
-
-                    browser = playwright.chromium.launch(
-                        headless=True,
-                        args=[
-                            "--no-sandbox",
-                            "--disable-dev-shm-usage"
-                        ]
+                    context, page, video = open_video(
+                        browser
                     )
 
-                    page = browser.new_page(
-                        viewport={
-                            "width": 1280,
-                            "height": 900
-                        }
-                    )
+                    log("MONITORING LIVE VIDEO")
 
-                    video_ready = open_youtube(page)
-
-                    if video_ready:
-
-                        missing_frames = 0
-
-                        while True:
-
-                            if not check_youtube(page):
-                                break
-
-                            frame = capture_frame(page)
-
-                            if frame is None:
-
-                                missing_frames += 1
-
-                                log(
-                                    "MISSING FRAME:",
-                                    missing_frames
-                                )
-
-                                if missing_frames >= 3:
-
-                                    log(
-                                        "VIDEO LOST. "
-                                        "RESTARTING BROWSER."
-                                    )
-
-                                    break
-
-                            else:
-
-                                missing_frames = 0
-
-                                process_frame(frame)
-
-                            time.sleep(
-                                CHECK_SECONDS
+                    while True:
+                        if page.is_closed():
+                            raise RuntimeError(
+                                "YouTube page closed"
                             )
 
-                    else:
-                        log(
-                            "VIDEO UNAVAILABLE. "
-                            "SESSION WILL RESTART."
-                        )
+                        if video.count() == 0:
+                            raise RuntimeError(
+                                "Video element disappeared"
+                            )
+
+                        frame = capture_frame(video)
+
+                        process_frame(frame)
+
+                        time.sleep(CHECK_SECONDS)
 
                 finally:
-
-                    if browser is not None:
-
+                    if context is not None:
                         try:
-                            browser.close()
-
+                            context.close()
                         except Exception:
                             pass
 
-                    log(
-                        "BROWSER SESSION CLOSED"
-                    )
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+
+        except KeyboardInterrupt:
+            log("MONITOR STOPPED")
+            return
 
         except Exception as error:
-
             log(
-                "MONITOR ERROR:",
-                error
+                f"MONITOR ERROR: "
+                f"{type(error).__name__}: {error}"
             )
 
-        log(
-            "RETRYING IN",
-            RETRY_SECONDS,
-            "SECONDS"
-        )
-
-        time.sleep(
-            RETRY_SECONDS
-        )
+        log("RECONNECTING IN 30 SECONDS")
+        time.sleep(30)
 
 
 def run_monitor():
