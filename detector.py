@@ -1,4 +1,5 @@
 import re
+from collections import Counter
 
 import cv2
 import numpy as np
@@ -6,14 +7,14 @@ import pytesseract
 
 
 # ============================================================
-# MILLION MOVES XAUUSD SIGNAL DETECTOR
+# MILLION MOVES DETECTOR
 #
 # Yellow = Entry
-# Green  = TP1, TP2, TP3
-# Red    = Stop Loss
+# Green  = TP1 / TP2 / TP3
+# Red    = Stop loss
 #
-# Detect labels on the right side of the video.
-# Never guess missing prices.
+# Only inspect coloured price labels on the right.
+# Never invent a missing price.
 # ============================================================
 
 
@@ -21,7 +22,7 @@ def extract_prices(text):
     text = text.replace(",", "")
 
     matches = re.findall(
-        r"(?<!\d)\d{4,5}[.,]\d{1,3}(?!\d)",
+        r"(?<!\d)\d{4,5}\.\d{1,3}(?!\d)",
         text
     )
 
@@ -29,128 +30,47 @@ def extract_prices(text):
 
     for match in matches:
         try:
-            price = float(match.replace(",", "."))
+            value = round(float(match), 2)
 
-            if 1000 <= price <= 10000:
-                prices.append(round(price, 2))
+            if 1000 <= value <= 10000:
+                prices.append(value)
 
         except ValueError:
-            continue
+            pass
 
     return prices
 
 
-def clean_text(text):
-    return " ".join(text.upper().split())
-
-
-def read_text(image, psm=7):
-    if image is None or image.size == 0:
-        return ""
-
-    if len(image.shape) == 3:
-        gray = cv2.cvtColor(
-            image,
-            cv2.COLOR_BGR2GRAY
-        )
-    else:
-        gray = image
-
-    gray = cv2.resize(
-        gray,
-        None,
-        fx=3,
-        fy=3,
-        interpolation=cv2.INTER_CUBIC
-    )
-
-    gray = cv2.GaussianBlur(
-        gray,
-        (3, 3),
-        0
-    )
-
-    _, threshold = cv2.threshold(
-        gray,
-        0,
-        255,
-        cv2.THRESH_BINARY + cv2.THRESH_OTSU
-    )
-
-    results = []
-
-    for candidate in (
-        gray,
-        threshold,
-        255 - threshold
-    ):
-        try:
-            text = pytesseract.image_to_string(
-                candidate,
-                config=(
-                    f"--psm {psm} "
-                    "-c tessedit_char_whitelist="
-                    "0123456789.,ABCDEFGHIJKLMNOPQRSTUVWXYZ:/- "
-                )
-            )
-
-            if text.strip():
-                results.append(text.strip())
-
-        except Exception as exc:
-            print(
-                "OCR ERROR:",
-                exc,
-                flush=True
-            )
-
-    return "\n".join(results)
-
-
-def make_colour_mask(hsv, colour):
+def colour_mask(hsv, colour):
 
     if colour == "yellow":
-
-        lower = np.array([15, 75, 75])
-        upper = np.array([42, 255, 255])
-
         return cv2.inRange(
             hsv,
-            lower,
-            upper
+            np.array([15, 85, 95]),
+            np.array([43, 255, 255])
         )
 
     if colour == "green":
-
-        lower = np.array([35, 45, 40])
-        upper = np.array([100, 255, 255])
-
         return cv2.inRange(
             hsv,
-            lower,
-            upper
+            np.array([35, 75, 85]),
+            np.array([105, 255, 255])
         )
 
     if colour == "red":
-
-        lower1 = np.array([0, 65, 55])
-        upper1 = np.array([12, 255, 255])
-
-        lower2 = np.array([168, 65, 55])
-        upper2 = np.array([179, 255, 255])
-
-        return cv2.bitwise_or(
-            cv2.inRange(
-                hsv,
-                lower1,
-                upper1
-            ),
-            cv2.inRange(
-                hsv,
-                lower2,
-                upper2
-            )
+        first = cv2.inRange(
+            hsv,
+            np.array([0, 75, 75]),
+            np.array([13, 255, 255])
         )
+
+        second = cv2.inRange(
+            hsv,
+            np.array([165, 75, 75]),
+            np.array([179, 255, 255])
+        )
+
+        return cv2.bitwise_or(first, second)
 
     return np.zeros(
         hsv.shape[:2],
@@ -158,39 +78,32 @@ def make_colour_mask(hsv, colour):
     )
 
 
-def find_label_regions(frame, colour):
+def find_labels(frame, colour):
 
     height, width = frame.shape[:2]
 
-    left = int(width * 0.58)
+    # The active price labels are on the far right.
+    left = int(width * 0.75)
 
-    right_frame = frame[:, left:width]
+    right = frame[:, left:]
 
     hsv = cv2.cvtColor(
-        right_frame,
+        right,
         cv2.COLOR_BGR2HSV
     )
 
-    mask = make_colour_mask(
-        hsv,
-        colour
-    )
+    mask = colour_mask(hsv, colour)
 
+    # Connect characters and background within a label.
     kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
-        (13, 3)
+        (7, 3)
     )
 
     mask = cv2.morphologyEx(
         mask,
         cv2.MORPH_CLOSE,
         kernel
-    )
-
-    mask = cv2.dilate(
-        mask,
-        np.ones((3, 5), np.uint8),
-        iterations=1
     )
 
     contours, _ = cv2.findContours(
@@ -203,71 +116,44 @@ def find_label_regions(frame, colour):
 
     for contour in contours:
 
-        x, y, w, h = cv2.boundingRect(
-            contour
-        )
+        x, y, w, h = cv2.boundingRect(contour)
 
-        if w < 12 or h < 5:
+        # Reject tiny coloured chart details.
+        if w < 20 or h < 6:
             continue
 
-        if w * h < 90:
+        # Reject large chart regions.
+        if h > max(35, int(height * 0.08)):
+            continue
+
+        if w > int(width * 0.24):
+            continue
+
+        area = cv2.contourArea(contour)
+
+        if area / max(w * h, 1) < 0.35:
             continue
 
         x += left
 
-        pad_x = max(
-            12,
-            int(width * 0.025)
-        )
-
-        pad_y = 7
-
-        x1 = max(
-            left,
-            x - pad_x
-        )
-
-        y1 = max(
-            0,
-            y - pad_y
-        )
-
-        x2 = min(
-            width,
-            x + w + pad_x
-        )
-
-        y2 = min(
-            height,
-            y + h + pad_y
-        )
-
         regions.append({
-            "x1": x1,
-            "y1": y1,
-            "x2": x2,
-            "y2": y2,
-            "centre_y": (y1 + y2) / 2
+            "x1": max(left, x - 4),
+            "y1": max(0, y - 3),
+            "x2": min(width, x + w + 4),
+            "y2": min(height, y + h + 3),
+            "y": y + h / 2
         })
 
-    regions.sort(
-        key=lambda item: item["centre_y"]
-    )
+    regions.sort(key=lambda item: item["y"])
 
+    # Combine overlapping pieces of the same label.
     merged = []
 
     for region in regions:
 
         if (
             merged
-            and region["y1"] <= merged[-1]["y2"]
-            and abs(
-                region["centre_y"]
-                - merged[-1]["centre_y"]
-            ) < max(
-                12,
-                height * 0.025
-            )
+            and abs(region["y"] - merged[-1]["y"]) < 9
         ):
 
             previous = merged[-1]
@@ -277,14 +163,14 @@ def find_label_regions(frame, colour):
                 region["x1"]
             )
 
-            previous["y1"] = min(
-                previous["y1"],
-                region["y1"]
-            )
-
             previous["x2"] = max(
                 previous["x2"],
                 region["x2"]
+            )
+
+            previous["y1"] = min(
+                previous["y1"],
+                region["y1"]
             )
 
             previous["y2"] = max(
@@ -292,264 +178,145 @@ def find_label_regions(frame, colour):
                 region["y2"]
             )
 
-            previous["centre_y"] = (
-                previous["y1"]
-                + previous["y2"]
-            ) / 2
-
         else:
-
-            merged.append(
-                region.copy()
-            )
+            merged.append(region.copy())
 
     return merged
 
 
-# ============================================================
-# FIXED LABEL READING
-#
-# Crop each detected label separately.
-# Do not extend the crop to the right edge.
-# Try OCR methods independently.
-# ============================================================
+def ocr_candidates(crop):
+
+    if crop is None or crop.size == 0:
+        return []
+
+    gray = cv2.cvtColor(
+        crop,
+        cv2.COLOR_BGR2GRAY
+    )
+
+    gray = cv2.resize(
+        gray,
+        None,
+        fx=4,
+        fy=4,
+        interpolation=cv2.INTER_CUBIC
+    )
+
+    _, binary = cv2.threshold(
+        gray,
+        0,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+
+    variants = [
+        gray,
+        binary,
+        255 - binary
+    ]
+
+    results = []
+
+    for image in variants:
+
+        for psm in (7, 13):
+
+            try:
+                text = pytesseract.image_to_string(
+                    image,
+                    config=(
+                        f"--psm {psm} "
+                        "-c tessedit_char_whitelist="
+                        "0123456789.,"
+                    )
+                )
+
+                prices = extract_prices(text)
+
+                if len(prices) == 1:
+                    results.append(prices[0])
+
+            except Exception as exc:
+                print(
+                    "OCR ERROR:",
+                    exc,
+                    flush=True
+                )
+
+    return results
+
 
 def read_label(frame, region):
 
-    height, width = frame.shape[:2]
-
-    x1 = max(
-        0,
-        region["x1"] - 5
-    )
-
-    x2 = min(
-        width,
-        region["x2"] + 5
-    )
-
-    y1 = max(
-        0,
-        region["y1"] - 2
-    )
-
-    y2 = min(
-        height,
-        region["y2"] + 2
-    )
-
     crop = frame[
-        y1:y2,
-        x1:x2
+        region["y1"]:region["y2"],
+        region["x1"]:region["x2"]
     ]
 
-    if crop.size == 0:
+    candidates = ocr_candidates(crop)
+
+    if not candidates:
         return None
 
-    for psm in (7, 6):
+    counts = Counter(candidates)
 
-        text = read_text(
-            crop,
-            psm=psm
+    price, votes = counts.most_common(1)[0]
+
+    # Require two independent OCR attempts to agree.
+    if votes < 2:
+        print(
+            "REJECTED UNCERTAIN PRICE:",
+            candidates,
+            flush=True
         )
+        return None
 
-        prices = extract_prices(
-            text
-        )
+    # Reject competing readings with equal support.
+    if len(counts) > 1:
+        second_votes = counts.most_common(2)[1][1]
 
-        unique_prices = list(
-            dict.fromkeys(prices)
-        )
+        if second_votes == votes:
+            print(
+                "REJECTED CONFLICTING PRICES:",
+                candidates,
+                flush=True
+            )
+            return None
 
-        if len(unique_prices) == 1:
-
-            return {
-                "price": unique_prices[0],
-                "text": clean_text(text),
-                "y": region["centre_y"]
-            }
-
-    return None
+    return {
+        "price": price,
+        "y": region["y"]
+    }
 
 
-def get_colour_labels(frame, colour):
+def get_labels(frame, colour):
 
-    regions = find_label_regions(
-        frame,
-        colour
-    )
+    regions = find_labels(frame, colour)
 
     labels = []
 
     for region in regions:
 
-        result = read_label(
-            frame,
-            region
-        )
+        label = read_label(frame, region)
 
-        if result is not None:
-            labels.append(result)
+        if label is not None:
+            labels.append(label)
 
-    labels.sort(
-        key=lambda item: item["y"]
-    )
-
-    unique = []
-
-    for label in labels:
-
-        duplicate = False
-
-        for previous in unique:
-
-            if (
-                label["price"] == previous["price"]
-                and abs(
-                    label["y"] - previous["y"]
-                ) < 18
-            ):
-
-                duplicate = True
-                break
-
-        if not duplicate:
-            unique.append(label)
+    labels.sort(key=lambda item: item["y"])
 
     print(
         colour.upper() + " LABELS:",
-        unique,
+        labels,
         flush=True
     )
 
-    return unique
-
-
-def choose_entry(labels):
-
-    if not labels:
-        return None
-
-    explicit = [
-        label
-        for label in labels
-        if "ENTRY" in label["text"]
-    ]
-
-    if len(explicit) == 1:
-        return explicit[0]["price"]
-
-    if len(labels) == 1:
-        return labels[0]["price"]
-
-    return None
-
-
-def choose_stop_loss(
-    labels,
-    entry,
-    direction
-):
-
-    candidates = []
-
-    for label in labels:
-
-        price = label["price"]
-
-        if (
-            direction == "BUY"
-            and price < entry
-        ):
-            candidates.append(price)
-
-        elif (
-            direction == "SELL"
-            and price > entry
-        ):
-            candidates.append(price)
-
-    if len(candidates) == 1:
-        return candidates[0]
-
-    return None
-
-
-def choose_targets(labels, entry):
-
-    prices = []
-
-    for label in labels:
-
-        price = label["price"]
-
-        if price == entry:
-            continue
-
-        if price not in prices:
-            prices.append(price)
-
-    if len(prices) != 3:
-
-        print(
-            "TARGETS NOT CONFIRMED: expected 3, found",
-            len(prices),
-            flush=True
-        )
-
-        return None
-
-    below = all(
-        price < entry
-        for price in prices
-    )
-
-    above = all(
-        price > entry
-        for price in prices
-    )
-
-    if below:
-
-        direction = "SELL"
-
-        prices.sort(
-            reverse=True
-        )
-
-    elif above:
-
-        direction = "BUY"
-
-        prices.sort()
-
-    else:
-
-        print(
-            "TARGETS REJECTED: inconsistent direction",
-            prices,
-            flush=True
-        )
-
-        return None
-
-    return {
-        "direction": direction,
-        "tp1": prices[0],
-        "tp2": prices[1],
-        "tp3": prices[2]
-    }
+    return labels
 
 
 def detect_signal(frame):
 
     if frame is None or frame.size == 0:
-
-        print(
-            "EMPTY FRAME",
-            flush=True
-        )
-
+        print("EMPTY FRAME", flush=True)
         return None
 
     print(
@@ -558,63 +325,103 @@ def detect_signal(frame):
         flush=True
     )
 
-    yellow_labels = get_colour_labels(
-        frame,
-        "yellow"
-    )
+    # --------------------------------------------------------
+    # ENTRY
+    # --------------------------------------------------------
 
-    entry = choose_entry(
-        yellow_labels
-    )
+    yellow = get_labels(frame, "yellow")
 
-    if entry is None:
+    if len(yellow) != 1:
+        print("ENTRY NOT CONFIRMED", flush=True)
+        return None
+
+    entry = yellow[0]["price"]
+
+    print("ENTRY:", entry, flush=True)
+
+    # --------------------------------------------------------
+    # TARGETS
+    # --------------------------------------------------------
+
+    green = get_labels(frame, "green")
+
+    # Three separate green labels are required.
+    if len(green) != 3:
+        print(
+            "TARGETS NOT CONFIRMED: expected 3, found",
+            len(green),
+            flush=True
+        )
+        return None
+
+    prices = [label["price"] for label in green]
+
+    if len(set(prices)) != 3:
+        print(
+            "DUPLICATE TP PRICES REJECTED:",
+            prices,
+            flush=True
+        )
+        return None
+
+    # Preserve the labels' vertical order:
+    # TP1 at the top, then TP2, then TP3.
+    tp1, tp2, tp3 = prices
+
+    if tp1 > entry and tp2 > tp1 and tp3 > tp2:
+
+        direction = "BUY"
+
+    elif tp1 < entry and tp2 < tp1 and tp3 < tp2:
+
+        direction = "SELL"
+
+    else:
 
         print(
-            "ENTRY NOT CONFIRMED",
+            "TARGET PRICES INCONSISTENT:",
+            prices,
+            "ENTRY:",
+            entry,
             flush=True
         )
 
         return None
 
-    print(
-        "ENTRY:",
-        entry,
-        flush=True
-    )
+    # --------------------------------------------------------
+    # STOP LOSS
+    # --------------------------------------------------------
 
-    green_labels = get_colour_labels(
-        frame,
-        "green"
-    )
+    red = get_labels(frame, "red")
 
-    targets = choose_targets(
-        green_labels,
-        entry
-    )
+    sl = None
 
-    if targets is None:
-        return None
+    valid_stops = []
 
-    direction = targets["direction"]
+    for label in red:
 
-    red_labels = get_colour_labels(
-        frame,
-        "red"
-    )
+        price = label["price"]
 
-    sl = choose_stop_loss(
-        red_labels,
-        entry,
-        direction
-    )
+        if direction == "BUY" and price < entry:
+            valid_stops.append(price)
+
+        elif direction == "SELL" and price > entry:
+            valid_stops.append(price)
+
+    if len(valid_stops) == 1:
+        sl = valid_stops[0]
+
+    # --------------------------------------------------------
+    # FINAL SIGNAL
+    # --------------------------------------------------------
 
     signal = {
         "direction": direction,
         "entry": entry,
         "sl": sl,
-        "tp1": targets["tp1"],
-        "tp2": targets["tp2"],
-        "tp3": targets["tp3"]
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3
     }
 
     print(
