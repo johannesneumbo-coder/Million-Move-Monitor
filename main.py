@@ -6,7 +6,30 @@ import uvicorn
 
 
 def keep_alive_monitor():
+
+    # Run the YouTube diagnostic once at startup.
+    try:
+        from youtube_source import test_youtube_access
+
+        print(
+            "Running YouTube access diagnostic...",
+            flush=True
+        )
+
+        test_youtube_access()
+
+    except Exception as e:
+
+        print(
+            "YouTube diagnostic crashed:",
+            type(e).__name__,
+            str(e),
+            flush=True
+        )
+
+    # Continue running the existing monitor.
     while True:
+
         try:
             from monitor import monitor
 
@@ -23,6 +46,7 @@ def keep_alive_monitor():
             )
 
         except Exception as e:
+
             print(
                 "Monitor crashed:",
                 type(e).__name__,
