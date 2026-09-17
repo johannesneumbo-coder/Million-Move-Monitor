@@ -37,7 +37,7 @@ def log(message):
     print(message, flush=True)
 
 
-def signal_key(signal):
+def make_signal_key(signal):
     if not isinstance(signal, dict):
         return None
 
@@ -79,29 +79,6 @@ def format_signal(signal):
     return "\n".join(lines)
 
 
-def check_youtube(page):
-    if page.is_closed():
-        raise RuntimeError("YouTube page closed")
-
-    text = page.locator("body").inner_text(
-        timeout=5000
-    ).lower()
-
-    blocked = (
-        "sign in to confirm you're not a bot",
-        "sign in to confirm you’re not a bot",
-        "unusual traffic",
-        "verify that you're not a bot",
-        "verify that you’re not a bot"
-    )
-
-    if any(message in text for message in blocked):
-        raise RuntimeError(
-            "YOUTUBE ACCESS BLOCKED: "
-            "Sign-in verification required"
-        )
-
-
 def open_youtube(browser):
     context = browser.new_context(
         viewport={
@@ -123,8 +100,6 @@ def open_youtube(browser):
 
     page.wait_for_timeout(8000)
 
-    check_youtube(page)
-
     try:
         page.get_by_role(
             "button",
@@ -133,12 +108,17 @@ def open_youtube(browser):
     except Exception:
         pass
 
+    log("YOUTUBE PAGE LOADED")
+
+    return context, page
+
+
+def prepare_video(page):
     video = page.locator("video").first
 
-    video.wait_for(
-        state="attached",
-        timeout=30000
-    )
+    if video.count() == 0:
+        log("VIDEO ELEMENT NOT FOUND")
+        return None
 
     try:
         video.evaluate(
@@ -149,20 +129,29 @@ def open_youtube(browser):
             }
             """
         )
+
+        log("VIDEO PLAY REQUESTED")
+
     except Exception as error:
-        log(f"VIDEO PLAY REQUEST: {error}")
+        log(
+            "VIDEO PLAY ERROR: "
+            f"{type(error).__name__}: {error}"
+        )
 
-    log("VIDEO ELEMENT FOUND")
-
-    return context, page, video
+    return video
 
 
-def capture_frame(page, video):
-    check_youtube(page)
-
-    if video.count() == 0:
+def capture_frame(page):
+    if page.is_closed():
         raise RuntimeError(
-            "Video element disappeared"
+            "YouTube page closed"
+        )
+
+    video = prepare_video(page)
+
+    if video is None:
+        raise RuntimeError(
+            "Video element unavailable"
         )
 
     state = video.evaluate(
@@ -171,10 +160,13 @@ def capture_frame(page, video):
             readyState: video.readyState,
             width: video.videoWidth,
             height: video.videoHeight,
-            currentTime: video.currentTime
+            currentTime: video.currentTime,
+            paused: video.paused
         })
         """
     )
+
+    log(f"VIDEO STATE: {state}")
 
     if (
         state["readyState"] < 2
@@ -182,11 +174,11 @@ def capture_frame(page, video):
         or state["height"] <= 0
     ):
         raise RuntimeError(
-            f"Video not ready: {state}"
+            "Video has not produced a frame"
         )
 
-    # Capture the visible page instead of screenshotting
-    # the video element, which can be marked invisible.
+    log("TAKING PAGE SCREENSHOT")
+
     page.screenshot(
         path=str(SCREENSHOT_FILE),
         full_page=False,
@@ -202,8 +194,6 @@ def capture_frame(page, video):
             "Screenshot could not be read"
         )
 
-    # Crop the video player so detector.py receives
-    # the chart, not the entire YouTube page.
     player = page.locator(
         "#movie_player"
     ).first
@@ -234,17 +224,16 @@ def capture_frame(page, video):
 
     if x2 - x1 < 300 or y2 - y1 < 200:
         raise RuntimeError(
-            "Video player crop is too small"
+            "Video player crop too small"
         )
 
     frame = frame[y1:y2, x1:x2]
 
     if frame.size == 0:
         raise RuntimeError(
-            "Video player crop is empty"
+            "Empty player frame"
         )
 
-    # Reject an almost uniform black/blank frame.
     gray = cv2.cvtColor(
         frame,
         cv2.COLOR_BGR2GRAY
@@ -252,7 +241,7 @@ def capture_frame(page, video):
 
     if gray.std() < 3:
         raise RuntimeError(
-            "Video frame appears blank"
+            "Blank player frame"
         )
 
     log(
@@ -271,7 +260,7 @@ def process_frame(frame):
         log("NO COMPLETE SIGNAL DETECTED")
         return
 
-    key = signal_key(signal)
+    key = make_signal_key(signal)
 
     if key is None:
         log("INVALID SIGNAL")
@@ -316,7 +305,7 @@ def monitor_loop():
                     ]
                 )
 
-                context, page, video = open_youtube(
+                context, page = open_youtube(
                     browser
                 )
 
@@ -327,41 +316,31 @@ def monitor_loop():
                 while True:
                     try:
                         frame = capture_frame(
-                            page,
-                            video
+                            page
                         )
 
                         failures = 0
 
                         process_frame(frame)
 
-                    except RuntimeError as error:
-                        if "YOUTUBE ACCESS BLOCKED" in str(error):
-                            raise
-
-                        failures += 1
-
-                        log(
-                            f"MONITOR ERROR "
-                            f"{failures}: {error}"
-                        )
-
                     except Exception as error:
                         failures += 1
 
                         log(
-                            f"MONITOR ERROR "
-                            f"{failures}: "
-                            f"{type(error).__name__}: {error}"
+                            f"CAPTURE ERROR {failures}: "
+                            f"{type(error).__name__}: "
+                            f"{error}"
                         )
 
-                    if failures >= 3:
+                    if failures >= 6:
                         raise RuntimeError(
                             "Restarting browser after "
-                            "three consecutive failures"
+                            "six consecutive failures"
                         )
 
-                    time.sleep(CHECK_SECONDS)
+                    time.sleep(
+                        CHECK_SECONDS
+                    )
 
         except KeyboardInterrupt:
             log("MONITOR STOPPED")
@@ -370,7 +349,8 @@ def monitor_loop():
         except Exception as error:
             log(
                 f"SESSION ERROR: "
-                f"{type(error).__name__}: {error}"
+                f"{type(error).__name__}: "
+                f"{error}"
             )
 
         finally:
