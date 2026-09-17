@@ -27,7 +27,8 @@ CHECK_SECONDS = max(
     int(os.getenv("CHECK_SECONDS", "5"))
 )
 
-RESTART_SECONDS = 15
+# Wait five minutes before restarting a failed browser session.
+RESTART_SECONDS = 300
 
 VIEWPORT_WIDTH = 1280
 VIEWPORT_HEIGHT = 720
@@ -145,8 +146,6 @@ def diagnose_page(page):
             body
         )
 
-        # Only print a short excerpt.
-        # Avoid exposing cookies or full page HTML.
         print(
             "PAGE TEXT:",
             body[:1500],
@@ -302,7 +301,6 @@ def open_youtube(page):
 
     diagnose_page(page)
 
-    # Cookie consent
     for name in [
         "Accept all",
         "I agree"
