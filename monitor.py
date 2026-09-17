@@ -1,5 +1,7 @@
 import os
 import time
+import re
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -25,12 +27,14 @@ CHECK_SECONDS = max(
     int(os.getenv("CHECK_SECONDS", "5"))
 )
 
-RESTART_SECONDS = 10
-
-MAX_PLAYBACK_ATTEMPTS = 3
+RESTART_SECONDS = 15
 
 VIEWPORT_WIDTH = 1280
 VIEWPORT_HEIGHT = 720
+
+DIAGNOSTIC_FILE = Path(
+    "/tmp/youtube_diagnostic.jpg"
+)
 
 
 # ============================================================
@@ -52,7 +56,12 @@ def make_signal_key(signal):
         return None
 
     try:
-        entry = round(float(entry), 2)
+
+        entry = round(
+            float(entry),
+            2
+        )
+
     except (TypeError, ValueError):
         return None
 
@@ -60,7 +69,7 @@ def make_signal_key(signal):
 
 
 # ============================================================
-# FORMAT PRICES
+# PRICE FORMAT
 # ============================================================
 
 def price_text(value):
@@ -82,7 +91,11 @@ def format_message(signal):
 
     direction = signal["direction"]
 
-    emoji = "🟢" if direction == "BUY" else "🔴"
+    emoji = (
+        "🟢"
+        if direction == "BUY"
+        else "🔴"
+    )
 
     return (
         f"{emoji} MILLION MOVES V5 SIGNAL\n\n"
@@ -98,6 +111,127 @@ def format_message(signal):
 
 
 # ============================================================
+# PAGE DIAGNOSTICS
+# ============================================================
+
+def diagnose_page(page):
+
+    print(
+        "========== YOUTUBE DIAGNOSTICS ==========",
+        flush=True
+    )
+
+    try:
+
+        print(
+            "PAGE URL:",
+            page.url,
+            flush=True
+        )
+
+        print(
+            "PAGE TITLE:",
+            page.title(),
+            flush=True
+        )
+
+        body = page.locator("body").inner_text(
+            timeout=10000
+        )
+
+        body = re.sub(
+            r"\s+",
+            " ",
+            body
+        )
+
+        # Only print a short excerpt.
+        # Avoid exposing cookies or full page HTML.
+        print(
+            "PAGE TEXT:",
+            body[:1500],
+            flush=True
+        )
+
+        lower = body.lower()
+
+        indicators = [
+            "sign in to confirm",
+            "not a bot",
+            "unusual traffic",
+            "verify",
+            "captcha",
+            "video unavailable",
+            "this video is unavailable",
+            "playback error",
+            "confirm you're not a bot"
+        ]
+
+        matches = [
+            item
+            for item in indicators
+            if item in lower
+        ]
+
+        print(
+            "CHALLENGE INDICATORS:",
+            matches,
+            flush=True
+        )
+
+        print(
+            "VIDEO ELEMENT COUNT:",
+            page.locator("video").count(),
+            flush=True
+        )
+
+        print(
+            "IFRAME COUNT:",
+            page.locator("iframe").count(),
+            flush=True
+        )
+
+        try:
+
+            page.screenshot(
+                path=str(DIAGNOSTIC_FILE),
+                type="jpeg",
+                quality=65,
+                timeout=10000,
+                animations="disabled"
+            )
+
+            print(
+                "DIAGNOSTIC SCREENSHOT:",
+                str(DIAGNOSTIC_FILE),
+                flush=True
+            )
+
+        except Exception as error:
+
+            print(
+                "DIAGNOSTIC SCREENSHOT ERROR:",
+                type(error).__name__,
+                str(error),
+                flush=True
+            )
+
+    except Exception as error:
+
+        print(
+            "DIAGNOSTIC ERROR:",
+            type(error).__name__,
+            str(error),
+            flush=True
+        )
+
+    print(
+        "========== END DIAGNOSTICS ==========",
+        flush=True
+    )
+
+
+# ============================================================
 # VIDEO STATE
 # ============================================================
 
@@ -105,18 +239,20 @@ def get_video_state(page):
 
     return page.evaluate(
         """() => {
+
             const v = document.querySelector('video');
 
             if (!v) {
+
                 return {
                     found: false,
                     error: 'Video element missing'
                 };
+
             }
 
-            const e = v.error;
-
             return {
+
                 found: true,
                 ready: v.readyState,
                 network: v.networkState,
@@ -124,50 +260,14 @@ def get_video_state(page):
                 height: v.videoHeight,
                 paused: v.paused,
                 currentTime: v.currentTime,
-                error: e ? {
-                    code: e.code,
-                    message: e.message
+
+                error: v.error ? {
+                    code: v.error.code,
+                    message: v.error.message
                 } : null
+
             };
-        }"""
-    )
 
-
-# ============================================================
-# REQUEST VIDEO PLAYBACK
-# ============================================================
-
-def request_playback(page):
-
-    return page.evaluate(
-        """async () => {
-            const v = document.querySelector('video');
-
-            if (!v) {
-                return 'VIDEO_MISSING';
-            }
-
-            v.muted = true;
-            v.autoplay = true;
-
-            try {
-                await Promise.race([
-                    v.play(),
-                    new Promise((_, reject) =>
-                        setTimeout(
-                            () => reject(
-                                new Error('PLAY_TIMEOUT')
-                            ),
-                            8000
-                        )
-                    )
-                ]);
-
-                return 'PLAY_REQUEST_SUCCEEDED';
-
-            } catch (e) {
-                return String(e);
-            }
         }"""
     )
 
@@ -184,13 +284,23 @@ def open_youtube(page):
         flush=True
     )
 
-    page.goto(
+    response = page.goto(
         YOUTUBE_URL,
         wait_until="domcontentloaded",
         timeout=60000
     )
 
-    page.wait_for_timeout(5000)
+    if response is not None:
+
+        print(
+            "HTTP STATUS:",
+            response.status,
+            flush=True
+        )
+
+    page.wait_for_timeout(8000)
+
+    diagnose_page(page)
 
     # Cookie consent
     for name in [
@@ -211,33 +321,16 @@ def open_youtube(page):
         except Exception:
             pass
 
-    # Skip advertisements when possible
-    try:
-
-        page.locator(
-            ".ytp-ad-skip-button, "
-            ".ytp-skip-ad-button"
-        ).first.click(timeout=2000)
-
-    except Exception:
-        pass
-
-    print(
-        "YouTube page loaded.",
-        flush=True
-    )
+    page.wait_for_timeout(3000)
 
 
 # ============================================================
-# ENSURE VIDEO PLAYBACK
+# PLAY VIDEO
 # ============================================================
 
 def ensure_video_playing(page):
 
-    for attempt in range(
-        1,
-        MAX_PLAYBACK_ATTEMPTS + 1
-    ):
+    for attempt in range(1, 4):
 
         print(
             "PLAYBACK ATTEMPT:",
@@ -255,25 +348,59 @@ def ensure_video_playing(page):
 
         if not state.get("found"):
 
+            diagnose_page(page)
+
             page.wait_for_timeout(5000)
+
             continue
 
-        if state.get("error"):
+        try:
+
+            result = page.evaluate(
+                """async () => {
+
+                    const v = document.querySelector('video');
+
+                    v.muted = true;
+
+                    try {
+
+                        await Promise.race([
+                            v.play(),
+                            new Promise((_, reject) =>
+                                setTimeout(
+                                    () => reject(
+                                        new Error('PLAY_TIMEOUT')
+                                    ),
+                                    8000
+                                )
+                            )
+                        ]);
+
+                        return 'PLAY_REQUEST_SUCCEEDED';
+
+                    } catch (error) {
+
+                        return String(error);
+
+                    }
+
+                }"""
+            )
 
             print(
-                "VIDEO ERROR:",
-                state["error"],
+                "PLAY RESULT:",
+                result,
                 flush=True
             )
 
-        # Request playback
-        result = request_playback(page)
+        except Exception as error:
 
-        print(
-            "PLAY RESULT:",
-            result,
-            flush=True
-        )
+            print(
+                "PLAY ERROR:",
+                str(error),
+                flush=True
+            )
 
         page.wait_for_timeout(5000)
 
@@ -299,17 +426,7 @@ def ensure_video_playing(page):
 
             return True
 
-        # Try clicking YouTube's play button
-        try:
-
-            page.locator(
-                ".ytp-play-button"
-            ).first.click(timeout=3000)
-
-        except Exception:
-            pass
-
-        page.wait_for_timeout(3000)
+    diagnose_page(page)
 
     print(
         "VIDEO PLAYBACK FAILED.",
@@ -320,7 +437,7 @@ def ensure_video_playing(page):
 
 
 # ============================================================
-# CAPTURE VIDEO FRAME
+# CAPTURE FRAME
 # ============================================================
 
 def capture_video(page):
@@ -343,18 +460,13 @@ def capture_video(page):
         or state.get("paused", True)
     ):
 
-        print(
-            "VIDEO NOT READY FOR CAPTURE.",
-            flush=True
-        )
-
         return None
 
-    video = page.locator("video").first
-
-    screenshot = video.screenshot(
+    screenshot = page.locator(
+        "video"
+    ).first.screenshot(
         type="jpeg",
-        quality=85,
+        quality=80,
         timeout=15000,
         animations="disabled"
     )
@@ -370,12 +482,6 @@ def capture_video(page):
     )
 
     if frame is None:
-
-        print(
-            "FRAME DECODE FAILED.",
-            flush=True
-        )
-
         return None
 
     print(
@@ -411,18 +517,12 @@ def process_signal(signal):
     key = make_signal_key(signal)
 
     if key is None:
-
-        print(
-            "Invalid signal key.",
-            flush=True
-        )
-
         return
 
     if signal_already_sent(key):
 
         print(
-            "Duplicate signal ignored:",
+            "Duplicate ignored:",
             key,
             flush=True
         )
@@ -430,12 +530,6 @@ def process_signal(signal):
         return
 
     message = format_message(signal)
-
-    print(
-        "Sending WhatsApp:",
-        key,
-        flush=True
-    )
 
     sent = send_whatsapp(message)
 
@@ -495,7 +589,6 @@ def run_browser_session(playwright):
 
         page.set_default_timeout(15000)
 
-        # Log page errors for troubleshooting
         page.on(
             "pageerror",
             lambda error: print(
@@ -548,19 +641,16 @@ def run_browser_session(playwright):
 
                 failed_frames += 1
 
-                print(
-                    "FAILED FRAMES:",
-                    failed_frames,
-                    flush=True
-                )
-
                 if failed_frames >= 3:
+
+                    diagnose_page(page)
 
                     raise RuntimeError(
                         "Video stopped producing frames."
                     )
 
                 time.sleep(CHECK_SECONDS)
+
                 continue
 
             failed_frames = 0
