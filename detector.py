@@ -4,21 +4,44 @@ import pytesseract
 import re
 
 
-# =========================================================
+# ============================================================
+# MILLION MOVES V5 - XAUUSD SIGNAL DETECTOR
+#
+# Yellow = Entry
+# Red = Stop Loss
+# Green = Take Profit
+#
+# Returns:
+# {
+#     "direction": "BUY",
+#     "entry": 4300.00,
+#     "sl": 4290.00,
+#     "tp1": 4310.00,
+#     "tp2": 4320.00,
+#     "tp3": 4330.00
+# }
+#
+# Returns None when a complete signal cannot be confirmed.
+# ============================================================
+
+
+# ============================================================
 # PRICE EXTRACTION
-# =========================================================
+# ============================================================
 
 def extract_prices(text):
 
     if not text:
         return []
 
-    values = []
+    text = text.replace(" ", "")
 
     patterns = re.findall(
-        r"\d{1,2}[,]?\d{3}[.]\d{1,3}|\d{4,5}[.]\d{1,3}",
+        r"\d{1,2},\d{3}\.\d{1,3}|\d{4,5}\.\d{1,3}",
         text
     )
+
+    values = []
 
     for value in patterns:
 
@@ -31,37 +54,64 @@ def extract_prices(text):
             if 1000 <= number <= 10000:
                 values.append(number)
 
-        except Exception:
-            pass
+        except ValueError:
+            continue
 
     return values
 
 
-# =========================================================
-# OCR
-# =========================================================
+# ============================================================
+# SAFE CROP
+# ============================================================
 
-def run_ocr(image, psm=6):
+def safe_crop(frame, x1, y1, x2, y2):
+
+    if frame is None:
+        return None
+
+    height, width = frame.shape[:2]
+
+    x1 = max(0, int(x1))
+    y1 = max(0, int(y1))
+
+    x2 = min(width, int(x2))
+    y2 = min(height, int(y2))
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    return frame[y1:y2, x1:x2]
+
+
+# ============================================================
+# OCR
+# ============================================================
+
+def run_ocr(image, psm=7):
+
+    if image is None or image.size == 0:
+        return ""
 
     try:
 
-        if image is None or image.size == 0:
-            return ""
+        if len(image.shape) == 3:
 
-        gray = cv2.cvtColor(
-            image,
-            cv2.COLOR_BGR2GRAY
-        )
+            gray = cv2.cvtColor(
+                image,
+                cv2.COLOR_BGR2GRAY
+            )
+
+        else:
+            gray = image.copy()
 
         gray = cv2.resize(
             gray,
             None,
-            fx=5,
-            fy=5,
+            fx=4,
+            fy=4,
             interpolation=cv2.INTER_CUBIC
         )
 
-        # Improve small text
         gray = cv2.GaussianBlur(
             gray,
             (3, 3),
@@ -72,331 +122,90 @@ def run_ocr(image, psm=6):
             gray,
             0,
             255,
-            cv2.THRESH_BINARY
-            + cv2.THRESH_OTSU
+            cv2.THRESH_BINARY + cv2.THRESH_OTSU
         )
 
-        texts = []
+        results = []
 
-        for img in [gray, threshold]:
+        for processed in [
+            gray,
+            threshold,
+            cv2.bitwise_not(threshold)
+        ]:
 
-            try:
-
-                text = pytesseract.image_to_string(
-                    img,
-                    config=f"--psm {psm}"
+            text = pytesseract.image_to_string(
+                processed,
+                config=(
+                    f"--psm {psm} "
+                    "-c tessedit_char_whitelist="
+                    "0123456789.,ABCDEFGHIJKLMNOPQRSTUVWXYZ:/ "
                 )
+            )
 
-                if text:
-                    texts.append(
-                        text.upper().strip()
-                    )
+            if text:
+                results.append(text.upper().strip())
 
-            except Exception:
-                pass
+        return " | ".join(results)
 
-        return " ".join(texts)
-
-    except Exception as e:
+    except Exception as error:
 
         print(
-            "OCR error:",
-            type(e).__name__,
-            str(e),
+            "OCR ERROR:",
+            str(error),
             flush=True
         )
 
         return ""
 
 
-# =========================================================
-# SAFE CROP
-# =========================================================
+# ============================================================
+# COLOR MASK
+# ============================================================
 
-def safe_crop(
-    frame,
-    x1,
-    y1,
-    x2,
-    y2
-):
-
-    height, width = frame.shape[:2]
-
-    x1 = max(0, int(x1))
-    y1 = max(0, int(y1))
-    x2 = min(width, int(x2))
-    y2 = min(height, int(y2))
-
-    if x2 <= x1 or y2 <= y1:
-        return None
-
-    return frame[
-        y1:y2,
-        x1:x2
-    ]
-
-
-# =========================================================
-# RIGHT-SIDE TRADING PANEL
-# =========================================================
-
-def get_trading_panel(frame):
-
-    height, width = frame.shape[:2]
-
-    # Million Moves labels are on the right side.
-    # Keep a large area because the labels can move.
-    x1 = int(width * 0.73)
-    x2 = int(width * 0.985)
-
-    y1 = int(height * 0.25)
-    y2 = int(height * 0.96)
-
-    return safe_crop(
-        frame,
-        x1,
-        y1,
-        x2,
-        y2
-    ), x1, y1
-
-
-# =========================================================
-# OCR THE WHOLE RIGHT PANEL
-# =========================================================
-
-def read_right_panel(frame):
-
-    panel, px, py = get_trading_panel(
-        frame
-    )
-
-    if panel is None:
-        return ""
-
-    texts = []
-
-    for psm in [6, 11, 12]:
-
-        text = run_ocr(
-            panel,
-            psm=psm
-        )
-
-        if text:
-            texts.append(text)
-
-    result = " | ".join(texts)
-
-    print(
-        "RIGHT PANEL OCR:",
-        result,
-        flush=True
-    )
-
-    return result
-
-
-# =========================================================
-# FIND YELLOW / ORANGE ENTRY BOX
-# =========================================================
-
-def find_yellow_entry(frame):
+def create_color_mask(frame, color):
 
     hsv = cv2.cvtColor(
         frame,
         cv2.COLOR_BGR2HSV
     )
 
-    height, width = frame.shape[:2]
+    if color == "yellow":
 
-    # Entry box is on right side.
-    roi_x1 = int(width * 0.72)
-    roi_x2 = int(width * 0.98)
-
-    roi = hsv[
-        :,
-        roi_x1:roi_x2
-    ]
-
-    # Million Moves yellow/orange entry labels
-    # can vary in hue, so use a broad range.
-    mask1 = cv2.inRange(
-        roi,
-        np.array([8, 70, 70]),
-        np.array([45, 255, 255])
-    )
-
-    # Morphology joins broken letters/background.
-    kernel = np.ones(
-        (3, 3),
-        np.uint8
-    )
-
-    mask1 = cv2.morphologyEx(
-        mask1,
-        cv2.MORPH_CLOSE,
-        kernel,
-        iterations=2
-    )
-
-    contours, _ = cv2.findContours(
-        mask1,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE
-    )
-
-    candidates = []
-
-    for contour in contours:
-
-        x, y, w, h = cv2.boundingRect(
-            contour
+        mask = cv2.inRange(
+            hsv,
+            np.array([8, 70, 70]),
+            np.array([45, 255, 255])
         )
 
-        area = cv2.contourArea(
-            contour
+    elif color == "red":
+
+        red1 = cv2.inRange(
+            hsv,
+            np.array([0, 80, 60]),
+            np.array([12, 255, 255])
         )
 
-        if area < 100:
-            continue
-
-        if w < 30 or w > 260:
-            continue
-
-        if h < 8 or h > 80:
-            continue
-
-        real_x = x + roi_x1
-
-        # Ignore the far-right price scale.
-        if real_x > width * 0.96:
-            continue
-
-        candidates.append(
-            (
-                real_x,
-                y,
-                w,
-                h,
-                area
-            )
+        red2 = cv2.inRange(
+            hsv,
+            np.array([160, 80, 60]),
+            np.array([180, 255, 255])
         )
 
-    if not candidates:
+        mask = cv2.bitwise_or(
+            red1,
+            red2
+        )
+
+    elif color == "green":
+
+        mask = cv2.inRange(
+            hsv,
+            np.array([45, 50, 50]),
+            np.array([105, 255, 255])
+        )
+
+    else:
         return None
-
-    # Try every candidate rather than only the largest one.
-    results = []
-
-    for x, y, w, h, area in candidates:
-
-        crop = safe_crop(
-            frame,
-            x - 25,
-            y - 15,
-            x + w + 25,
-            y + h + 15
-        )
-
-        text = run_ocr(
-            crop,
-            psm=7
-        )
-
-        prices = extract_prices(
-            text
-        )
-
-        if prices:
-
-            for price in prices:
-
-                results.append(
-                    {
-                        "entry": price,
-                        "text": text,
-                        "x": x,
-                        "y": y,
-                        "w": w,
-                        "h": h,
-                        "area": area
-                    }
-                )
-
-    if not results:
-        return None
-
-    # Prefer OCR containing ENTRY.
-    entry_words = [
-        item
-        for item in results
-        if "ENTRY" in item["text"]
-    ]
-
-    if entry_words:
-        results = entry_words
-
-    # Prefer price closest to the normal XAUUSD range
-    # and the largest label.
-    results.sort(
-        key=lambda item: (
-            -item["area"],
-            abs(item["entry"] - 4300)
-        )
-    )
-
-    selected = results[0]
-
-    print(
-        "ENTRY DETECTED:",
-        selected["entry"],
-        "| OCR:",
-        selected["text"],
-        flush=True
-    )
-
-    return selected
-
-
-# =========================================================
-# FIND RED STOP LOSS
-# =========================================================
-
-def find_red_stop_loss(frame):
-
-    hsv = cv2.cvtColor(
-        frame,
-        cv2.COLOR_BGR2HSV
-    )
-
-    height, width = frame.shape[:2]
-
-    roi_x1 = int(width * 0.72)
-    roi_x2 = int(width * 0.98)
-
-    roi = hsv[
-        :,
-        roi_x1:roi_x2
-    ]
-
-    red1 = cv2.inRange(
-        roi,
-        np.array([0, 80, 60]),
-        np.array([12, 255, 255])
-    )
-
-    red2 = cv2.inRange(
-        roi,
-        np.array([160, 80, 60]),
-        np.array([180, 255, 255])
-    )
-
-    mask = cv2.bitwise_or(
-        red1,
-        red2
-    )
 
     kernel = np.ones(
         (3, 3),
@@ -407,163 +216,48 @@ def find_red_stop_loss(frame):
         mask,
         cv2.MORPH_CLOSE,
         kernel,
-        iterations=2
+        iterations=1
     )
 
-    contours, _ = cv2.findContours(
-        mask,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE
-    )
-
-    candidates = []
-
-    for contour in contours:
-
-        x, y, w, h = cv2.boundingRect(
-            contour
-        )
-
-        area = cv2.contourArea(
-            contour
-        )
-
-        if area < 80:
-            continue
-
-        if w < 25 or w > 280:
-            continue
-
-        if h < 8 or h > 90:
-            continue
-
-        real_x = x + roi_x1
-
-        if real_x > width * 0.96:
-            continue
-
-        candidates.append(
-            (
-                real_x,
-                y,
-                w,
-                h,
-                area
-            )
-        )
-
-    results = []
-
-    for x, y, w, h, area in candidates:
-
-        crop = safe_crop(
-            frame,
-            x - 30,
-            y - 18,
-            x + w + 30,
-            y + h + 18
-        )
-
-        for psm in [6, 7, 11]:
-
-            text = run_ocr(
-                crop,
-                psm=psm
-            )
-
-            prices = extract_prices(
-                text
-            )
-
-            for price in prices:
-
-                results.append(
-                    {
-                        "sl": price,
-                        "text": text,
-                        "x": x,
-                        "y": y,
-                        "w": w,
-                        "h": h,
-                        "area": area
-                    }
-                )
-
-    if not results:
-        return None
-
-    stop_words = [
-        item
-        for item in results
-        if "STOP" in item["text"]
-        or "LOSS" in item["text"]
-    ]
-
-    if stop_words:
-        results = stop_words
-
-    results.sort(
-        key=lambda item: -item["area"]
-    )
-
-    selected = results[0]
-
-    print(
-        "STOP LOSS DETECTED:",
-        selected["sl"],
-        "| OCR:",
-        selected["text"],
-        flush=True
-    )
-
-    return selected
+    return mask
 
 
-# =========================================================
-# GREEN TP LABELS
-# =========================================================
+# ============================================================
+# FIND COLORED PRICE LABELS
+# ============================================================
 
-def find_green_targets(
-    frame,
-    entry
-):
-
-    hsv = cv2.cvtColor(
-        frame,
-        cv2.COLOR_BGR2HSV
-    )
+def find_color_labels(frame, color):
 
     height, width = frame.shape[:2]
 
-    roi_x1 = int(width * 0.72)
-    roi_x2 = int(width * 0.98)
+    # Focus on the right-hand TradingView labels.
+    x1 = int(width * 0.65)
+    x2 = int(width * 0.985)
 
-    roi = hsv[
-        :,
-        roi_x1:roi_x2
-    ]
+    y1 = int(height * 0.10)
+    y2 = int(height * 0.96)
 
-    # Green/cyan Million Moves labels.
-    mask1 = cv2.inRange(
+    roi = safe_crop(
+        frame,
+        x1,
+        y1,
+        x2,
+        y2
+    )
+
+    if roi is None:
+        return []
+
+    mask = create_color_mask(
         roi,
-        np.array([45, 50, 50]),
-        np.array([105, 255, 255])
+        color
     )
 
-    kernel = np.ones(
-        (3, 3),
-        np.uint8
-    )
-
-    mask1 = cv2.morphologyEx(
-        mask1,
-        cv2.MORPH_CLOSE,
-        kernel,
-        iterations=2
-    )
+    if mask is None:
+        return []
 
     contours, _ = cv2.findContours(
-        mask1,
+        mask,
         cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_SIMPLE
     )
@@ -583,19 +277,443 @@ def find_green_targets(
         if area < 60:
             continue
 
-        if w < 25 or w > 280:
+        if w < 20 or h < 7:
             continue
 
-        if h < 7 or h > 80:
+        if w > roi.shape[1] * 0.95:
             continue
 
-        real_x = x + roi_x1
+        if h > 90:
+            continue
 
+        real_x = x + x1
+        real_y = y + y1
+
+        # Exclude labels entirely inside the far-right
+        # TradingView price scale.
         if real_x > width * 0.96:
             continue
 
         crop = safe_crop(
             frame,
-            real_x - 30,
-            y - 18,
-            real_x + w + 30
+            real_x - 35,
+            real_y - 15,
+            real_x + w + 35,
+            real_y + h + 15
+        )
+
+        text = run_ocr(
+            crop,
+            psm=7
+        )
+
+        prices = extract_prices(text)
+
+        if not prices:
+            continue
+
+        # Avoid treating multiple OCR variants as
+        # multiple separate price labels.
+        unique_prices = list(dict.fromkeys(prices))
+
+        if len(unique_prices) != 1:
+            continue
+
+        results.append(
+            {
+                "price": unique_prices[0],
+                "text": text,
+                "x": real_x,
+                "y": real_y,
+                "w": w,
+                "h": h,
+                "area": area
+            }
+        )
+
+    # Remove duplicate detections of the same label.
+    unique = []
+
+    for item in sorted(
+        results,
+        key=lambda value: -value["area"]
+    ):
+
+        duplicate = False
+
+        for existing in unique:
+
+            same_price = (
+                abs(
+                    item["price"] -
+                    existing["price"]
+                ) < 0.01
+            )
+
+            same_position = (
+                abs(
+                    item["y"] -
+                    existing["y"]
+                ) < 20
+            )
+
+            if same_price and same_position:
+                duplicate = True
+                break
+
+        if not duplicate:
+            unique.append(item)
+
+    return unique
+
+
+# ============================================================
+# ENTRY DETECTION
+# ============================================================
+
+def find_yellow_entry(frame):
+
+    labels = find_color_labels(
+        frame,
+        "yellow"
+    )
+
+    if not labels:
+
+        print(
+            "ENTRY NOT DETECTED",
+            flush=True
+        )
+
+        return None
+
+    # Require an explicit entry label to avoid
+    # selecting unrelated yellow chart elements.
+    candidates = [
+        item
+        for item in labels
+        if "ENTRY" in item["text"]
+    ]
+
+    if not candidates:
+
+        print(
+            "YELLOW LABEL FOUND BUT ENTRY NOT CONFIRMED",
+            flush=True
+        )
+
+        return None
+
+    candidates.sort(
+        key=lambda item: -item["area"]
+    )
+
+    selected = candidates[0]
+
+    print(
+        "ENTRY:",
+        selected["price"],
+        flush=True
+    )
+
+    return {
+        **selected,
+        "entry": selected["price"]
+    }
+
+
+# ============================================================
+# STOP LOSS DETECTION
+# ============================================================
+
+def find_red_stop_loss(frame):
+
+    labels = find_color_labels(
+        frame,
+        "red"
+    )
+
+    candidates = [
+        item
+        for item in labels
+        if (
+            "SL" in item["text"]
+            or "S/L" in item["text"]
+            or "STOP" in item["text"]
+            or "LOSS" in item["text"]
+        )
+    ]
+
+    if not candidates:
+
+        print(
+            "STOP LOSS NOT DETECTED",
+            flush=True
+        )
+
+        return None
+
+    candidates.sort(
+        key=lambda item: -item["area"]
+    )
+
+    selected = candidates[0]
+
+    print(
+        "STOP LOSS:",
+        selected["price"],
+        flush=True
+    )
+
+    return {
+        **selected,
+        "sl": selected["price"]
+    }
+
+
+# ============================================================
+# TAKE PROFIT DETECTION
+# ============================================================
+
+def find_green_targets(frame, entry):
+
+    labels = find_color_labels(
+        frame,
+        "green"
+    )
+
+    targets = []
+
+    for item in labels:
+
+        price = item["price"]
+
+        if abs(price - entry) < 0.01:
+            continue
+
+        # Require a TP label rather than any green price.
+        if not re.search(
+            r"\bT/?P\s*[123]?\b|TAKE\s*PROFIT",
+            item["text"]
+        ):
+            continue
+
+        targets.append(item)
+
+    return targets
+
+
+# ============================================================
+# DIRECTION
+# ============================================================
+
+def determine_direction(entry, sl, targets):
+
+    if sl < entry:
+
+        direction = "BUY"
+
+        valid = [
+            item
+            for item in targets
+            if item["price"] > entry
+        ]
+
+        valid.sort(
+            key=lambda item: item["price"]
+        )
+
+    elif sl > entry:
+
+        direction = "SELL"
+
+        valid = [
+            item
+            for item in targets
+            if item["price"] < entry
+        ]
+
+        valid.sort(
+            key=lambda item: -item["price"]
+        )
+
+    else:
+
+        return None, []
+
+    return direction, valid
+
+
+# ============================================================
+# MAIN DETECTOR
+# ============================================================
+
+def detect_signal(frame):
+
+    print(
+        "RUNNING MILLION MOVES DETECTOR",
+        flush=True
+    )
+
+    if frame is None:
+
+        print(
+            "EMPTY FRAME",
+            flush=True
+        )
+
+        return None
+
+    if not isinstance(frame, np.ndarray):
+
+        print(
+            "INVALID FRAME",
+            flush=True
+        )
+
+        return None
+
+    if frame.size == 0:
+        return None
+
+    # --------------------------------------------------------
+    # ENTRY
+    # --------------------------------------------------------
+
+    entry_data = find_yellow_entry(frame)
+
+    if entry_data is None:
+        return None
+
+    entry = entry_data["entry"]
+
+    # --------------------------------------------------------
+    # STOP LOSS
+    # --------------------------------------------------------
+
+    sl_data = find_red_stop_loss(frame)
+
+    if sl_data is None:
+        return None
+
+    sl = sl_data["sl"]
+
+    # --------------------------------------------------------
+    # TARGETS
+    # --------------------------------------------------------
+
+    targets = find_green_targets(
+        frame,
+        entry
+    )
+
+    if not targets:
+
+        print(
+            "NO TARGETS DETECTED",
+            flush=True
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # DIRECTION
+    # --------------------------------------------------------
+
+    direction, valid_targets = determine_direction(
+        entry,
+        sl,
+        targets
+    )
+
+    if direction is None:
+
+        print(
+            "DIRECTION NOT CONFIRMED",
+            flush=True
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # REMOVE DUPLICATE TARGET PRICES
+    # --------------------------------------------------------
+
+    unique_targets = []
+
+    for item in valid_targets:
+
+        price = item["price"]
+
+        if all(
+            abs(price - existing) >= 0.01
+            for existing in unique_targets
+        ):
+
+            unique_targets.append(price)
+
+    # Require all three targets.
+    if len(unique_targets) < 3:
+
+        print(
+            "INCOMPLETE TARGETS:",
+            unique_targets,
+            flush=True
+        )
+
+        return None
+
+    tp1 = unique_targets[0]
+    tp2 = unique_targets[1]
+    tp3 = unique_targets[2]
+
+    # --------------------------------------------------------
+    # FINAL VALIDATION
+    # --------------------------------------------------------
+
+    if direction == "BUY":
+
+        valid = (
+            sl < entry < tp1 < tp2 < tp3
+        )
+
+    else:
+
+        valid = (
+            tp3 < tp2 < tp1 < entry < sl
+        )
+
+    if not valid:
+
+        print(
+            "INVALID SIGNAL PRICE ORDER",
+            flush=True
+        )
+
+        return None
+
+    # --------------------------------------------------------
+    # FINAL SIGNAL
+    # --------------------------------------------------------
+
+    signal = {
+        "direction": direction,
+        "entry": round(entry, 2),
+        "sl": round(sl, 2),
+        "tp1": round(tp1, 2),
+        "tp2": round(tp2, 2),
+        "tp3": round(tp3, 2)
+    }
+
+    print(
+        "SIGNAL DETECTED:",
+        signal,
+        flush=True
+    )
+
+    return signal
+
+
+# ============================================================
+# END OF DETECTOR
+# ============================================================
