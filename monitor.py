@@ -38,29 +38,20 @@ def make_signal_key(signal):
 
 
 def format_message(signal):
-    direction = signal.get("direction", "")
-    entry = signal.get("entry")
-    sl = signal.get("sl")
-    tp1 = signal.get("tp1")
-    tp2 = signal.get("tp2")
-    tp3 = signal.get("tp3")
-
     lines = [
-        f"XAUUSD {direction}",
-        f"Entry: {entry}",
+        f"XAUUSD {signal.get('direction')}",
+        f"Entry: {signal.get('entry')}"
     ]
 
-    if sl is not None:
-        lines.append(f"SL: {sl}")
-
-    if tp1 is not None:
-        lines.append(f"TP1: {tp1}")
-
-    if tp2 is not None:
-        lines.append(f"TP2: {tp2}")
-
-    if tp3 is not None:
-        lines.append(f"TP3: {tp3}")
+    for key, label in (
+        ("sl", "SL"),
+        ("tp1", "TP1"),
+        ("tp2", "TP2"),
+        ("tp3", "TP3")
+    ):
+        value = signal.get(key)
+        if value is not None:
+            lines.append(f"{label}: {value}")
 
     return "\n".join(lines)
 
@@ -73,32 +64,48 @@ def process_signal(signal):
     key = make_signal_key(signal)
 
     if key is None:
-        print("Signal missing valid direction or entry", flush=True)
+        print("Invalid signal", flush=True)
         return
 
     if signal_already_sent(key):
         print("Signal already sent:", key, flush=True)
         return
 
-    message = format_message(signal)
-
-    if send_whatsapp(message):
+    if send_whatsapp(format_message(signal)):
         set_last_signal(key)
-        print("New signal saved:", key, flush=True)
+        print("Signal sent:", key, flush=True)
     else:
-        print("WhatsApp failed; signal not marked as sent", flush=True)
+        print("WhatsApp send failed", flush=True)
+
+
+def wait_for_video(page):
+    try:
+        page.locator("video").first.wait_for(
+            state="attached",
+            timeout=30000
+        )
+
+        page.locator("video").first.evaluate(
+            """video => {
+                video.muted = true;
+                video.play().catch(() => {});
+            }"""
+        )
+
+        return True
+
+    except Exception as exc:
+        print("Video not available:", exc, flush=True)
+        return False
 
 
 def capture_frame(page):
     video = page.locator("video").first
 
     if video.count() == 0:
-        print("Video element not found", flush=True)
         return None
 
     try:
-        video.scroll_into_view_if_needed(timeout=5000)
-
         SCREENSHOT_FILE.parent.mkdir(
             parents=True,
             exist_ok=True
@@ -111,11 +118,9 @@ def capture_frame(page):
 
         frame = cv2.imread(str(SCREENSHOT_FILE))
 
-        if frame is None:
-            print("Screenshot could not be read", flush=True)
-            return None
+        if frame is not None:
+            print("FRAME CAPTURED:", frame.shape, flush=True)
 
-        print("FRAME CAPTURED:", frame.shape, flush=True)
         return frame
 
     except Exception as exc:
@@ -129,13 +134,11 @@ def monitor_loop():
     while True:
         try:
             with sync_playwright() as playwright:
-                print("LAUNCHING CHROMIUM", flush=True)
-
                 browser = playwright.chromium.launch(
                     headless=True,
                     args=[
                         "--no-sandbox",
-                        "--disable-dev-shm-usage",
+                        "--disable-dev-shm-usage"
                     ]
                 )
 
@@ -143,7 +146,7 @@ def monitor_loop():
                     page = browser.new_page(
                         viewport={
                             "width": 1280,
-                            "height": 900,
+                            "height": 900
                         }
                     )
 
@@ -155,49 +158,55 @@ def monitor_loop():
                         timeout=60000
                     )
 
-                    page.wait_for_timeout(8000)
-
-                    try:
-                        page.locator("video").first.evaluate(
-                            "(video) => video.play()"
-                        )
-                    except Exception as exc:
-                        print(
-                            "Video play attempt:",
-                            exc,
-                            flush=True
-                        )
-
                     while True:
-                        print("Taking screenshot...", flush=True)
-
-                        frame = capture_frame(page)
-
-                        if frame is not None:
+                        if not wait_for_video(page):
                             print(
-                                "Running signal detector...",
+                                "Video missing. Reloading page...",
                                 flush=True
                             )
 
-                            try:
-                                signal = detect_signal(frame)
-                                process_signal(signal)
-                            except Exception as exc:
-                                print(
-                                    "Signal detector error:",
-                                    exc,
-                                    flush=True
-                                )
+                            page.reload(
+                                wait_until="domcontentloaded",
+                                timeout=60000
+                            )
+
+                            time.sleep(10)
+                            continue
+
+                        frame = capture_frame(page)
+
+                        if frame is None:
+                            print(
+                                "Frame missing. Reloading page...",
+                                flush=True
+                            )
+
+                            page.reload(
+                                wait_until="domcontentloaded",
+                                timeout=60000
+                            )
+
+                            time.sleep(10)
+                            continue
+
+                        try:
+                            signal = detect_signal(frame)
+                            process_signal(signal)
+
+                        except Exception as exc:
+                            print(
+                                "Detector error:",
+                                exc,
+                                flush=True
+                            )
 
                         time.sleep(CHECK_SECONDS)
 
                 finally:
                     browser.close()
-                    print("BROWSER SESSION CLOSED", flush=True)
 
         except Exception as exc:
             print("Monitor error:", exc, flush=True)
-            print("Restarting browser in 10 seconds", flush=True)
             time.sleep(10)
 
 
