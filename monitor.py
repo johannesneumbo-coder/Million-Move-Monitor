@@ -37,7 +37,10 @@ def log(message):
     print(message, flush=True)
 
 
-def make_signal_key(signal):
+def signal_key(signal):
+    if not isinstance(signal, dict):
+        return None
+
     direction = str(
         signal.get("direction", "")
     ).strip().upper()
@@ -54,44 +57,49 @@ def make_signal_key(signal):
 
 
 def format_signal(signal):
-    return (
-        "LIVE XAUUSD SIGNAL\n"
-        f"Direction: {signal['direction']}\n"
-        f"Entry: {signal['entry']:.2f}\n"
-        f"SL: {signal['sl']:.2f}\n"
-        f"TP1: {signal['tp1']:.2f}\n"
-        f"TP2: {signal['tp2']:.2f}\n"
-        f"TP3: {signal['tp3']:.2f}"
-    )
+    lines = [
+        "LIVE XAUUSD SIGNAL",
+        f"Direction: {signal['direction']}",
+        f"Entry: {float(signal['entry']):.2f}"
+    ]
 
+    for key, label in (
+        ("sl", "SL"),
+        ("tp1", "TP1"),
+        ("tp2", "TP2"),
+        ("tp3", "TP3")
+    ):
+        value = signal.get(key)
 
-def check_blocked(page):
-    try:
-        text = page.locator("body").inner_text(
-            timeout=3000
-        ).lower()
-
-        blocked_messages = (
-            "sign in to confirm you're not a bot",
-            "sign in to confirm you’re not a bot",
-            "unusual traffic",
-            "verify that you're not a bot",
-            "verify that you’re not a bot"
-        )
-
-        if any(
-            message in text
-            for message in blocked_messages
-        ):
-            raise RuntimeError(
-                "YouTube sign-in verification required"
+        if value is not None:
+            lines.append(
+                f"{label}: {float(value):.2f}"
             )
 
-    except RuntimeError:
-        raise
+    return "\n".join(lines)
 
-    except Exception:
-        pass
+
+def check_youtube(page):
+    if page.is_closed():
+        raise RuntimeError("YouTube page closed")
+
+    text = page.locator("body").inner_text(
+        timeout=5000
+    ).lower()
+
+    blocked = (
+        "sign in to confirm you're not a bot",
+        "sign in to confirm you’re not a bot",
+        "unusual traffic",
+        "verify that you're not a bot",
+        "verify that you’re not a bot"
+    )
+
+    if any(message in text for message in blocked):
+        raise RuntimeError(
+            "YOUTUBE ACCESS BLOCKED: "
+            "Sign-in verification required"
+        )
 
 
 def open_youtube(browser):
@@ -115,7 +123,7 @@ def open_youtube(browser):
 
     page.wait_for_timeout(8000)
 
-    check_blocked(page)
+    check_youtube(page)
 
     try:
         page.get_by_role(
@@ -125,14 +133,14 @@ def open_youtube(browser):
     except Exception:
         pass
 
+    video = page.locator("video").first
+
+    video.wait_for(
+        state="attached",
+        timeout=30000
+    )
+
     try:
-        video = page.locator("video").first
-
-        video.wait_for(
-            state="attached",
-            timeout=20000
-        )
-
         video.evaluate(
             """
             video => {
@@ -141,28 +149,44 @@ def open_youtube(browser):
             }
             """
         )
-
-        log("VIDEO ELEMENT FOUND")
-
     except Exception as error:
-        log(
-            "VIDEO ELEMENT NOT READY: "
-            f"{type(error).__name__}: {error}"
-        )
+        log(f"VIDEO PLAY REQUEST: {error}")
 
-    return context, page
+    log("VIDEO ELEMENT FOUND")
+
+    return context, page, video
 
 
-def capture_frame(page):
-    if page.is_closed():
+def capture_frame(page, video):
+    check_youtube(page)
+
+    if video.count() == 0:
         raise RuntimeError(
-            "YouTube page closed"
+            "Video element disappeared"
         )
 
-    check_blocked(page)
+    state = video.evaluate(
+        """
+        video => ({
+            readyState: video.readyState,
+            width: video.videoWidth,
+            height: video.videoHeight,
+            currentTime: video.currentTime
+        })
+        """
+    )
 
-    log("TAKING PAGE SCREENSHOT")
+    if (
+        state["readyState"] < 2
+        or state["width"] <= 0
+        or state["height"] <= 0
+    ):
+        raise RuntimeError(
+            f"Video not ready: {state}"
+        )
 
+    # Capture the visible page instead of screenshotting
+    # the video element, which can be marked invisible.
     page.screenshot(
         path=str(SCREENSHOT_FILE),
         full_page=False,
@@ -178,61 +202,57 @@ def capture_frame(page):
             "Screenshot could not be read"
         )
 
-    # Prefer the player region when its position is available.
-    # Otherwise the detector receives the entire page.
-    try:
-        player = page.locator(
-            "#movie_player"
-        ).first
+    # Crop the video player so detector.py receives
+    # the chart, not the entire YouTube page.
+    player = page.locator(
+        "#movie_player"
+    ).first
 
-        bounds = player.bounding_box(
-            timeout=2000
+    bounds = player.bounding_box(
+        timeout=5000
+    )
+
+    if bounds is None:
+        raise RuntimeError(
+            "Video player position unavailable"
         )
 
-        if bounds:
-            height, width = frame.shape[:2]
+    height, width = frame.shape[:2]
 
-            x1 = max(
-                0,
-                int(bounds["x"])
-            )
+    x1 = max(0, int(bounds["x"]))
+    y1 = max(0, int(bounds["y"]))
 
-            y1 = max(
-                0,
-                int(bounds["y"])
-            )
+    x2 = min(
+        width,
+        int(bounds["x"] + bounds["width"])
+    )
 
-            x2 = min(
-                width,
-                int(
-                    bounds["x"] +
-                    bounds["width"]
-                )
-            )
+    y2 = min(
+        height,
+        int(bounds["y"] + bounds["height"])
+    )
 
-            y2 = min(
-                height,
-                int(
-                    bounds["y"] +
-                    bounds["height"]
-                )
-            )
+    if x2 - x1 < 300 or y2 - y1 < 200:
+        raise RuntimeError(
+            "Video player crop is too small"
+        )
 
-            if (
-                x2 - x1 >= 300
-                and y2 - y1 >= 200
-            ):
-                frame = frame[
-                    y1:y2,
-                    x1:x2
-                ]
+    frame = frame[y1:y2, x1:x2]
 
-                log("PLAYER REGION CROPPED")
+    if frame.size == 0:
+        raise RuntimeError(
+            "Video player crop is empty"
+        )
 
-    except Exception:
-        log(
-            "PLAYER CROP UNAVAILABLE; "
-            "USING PAGE SCREENSHOT"
+    # Reject an almost uniform black/blank frame.
+    gray = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2GRAY
+    )
+
+    if gray.std() < 3:
+        raise RuntimeError(
+            "Video frame appears blank"
         )
 
     log(
@@ -251,10 +271,10 @@ def process_frame(frame):
         log("NO COMPLETE SIGNAL DETECTED")
         return
 
-    key = make_signal_key(signal)
+    key = signal_key(signal)
 
     if key is None:
-        log("INVALID SIGNAL KEY")
+        log("INVALID SIGNAL")
         return
 
     log(f"SIGNAL DETECTED: {key}")
@@ -273,8 +293,6 @@ def process_frame(frame):
         log("WHATSAPP SEND FAILED")
         return
 
-    # Only record the signal after the send function
-    # returns without an explicit failure.
     set_last_signal(key)
 
     log("SIGNAL SENT AND SAVED")
@@ -284,9 +302,11 @@ def monitor_loop():
     log("MONITOR STARTED")
 
     while True:
+        context = None
+        browser = None
+
         try:
             with sync_playwright() as playwright:
-
                 browser = playwright.chromium.launch(
                     headless=True,
                     args=[
@@ -296,73 +316,52 @@ def monitor_loop():
                     ]
                 )
 
-                context = None
+                context, page, video = open_youtube(
+                    browser
+                )
 
-                try:
-                    context, page = open_youtube(
-                        browser
-                    )
+                log("MONITORING LIVE VIDEO")
 
-                    log("MONITORING STARTED")
+                failures = 0
 
-                    consecutive_errors = 0
-
-                    while True:
-                        try:
-                            frame = capture_frame(
-                                page
-                            )
-
-                            process_frame(
-                                frame
-                            )
-
-                            consecutive_errors = 0
-
-                        except RuntimeError as error:
-                            if (
-                                "sign-in verification"
-                                in str(error).lower()
-                            ):
-                                raise
-
-                            consecutive_errors += 1
-
-                            log(
-                                f"CAPTURE ERROR "
-                                f"{consecutive_errors}: "
-                                f"{error}"
-                            )
-
-                        except Exception as error:
-                            consecutive_errors += 1
-
-                            log(
-                                "PROCESSING ERROR: "
-                                f"{type(error).__name__}: "
-                                f"{error}"
-                            )
-
-                        if consecutive_errors >= 3:
-                            raise RuntimeError(
-                                "Three consecutive failures"
-                            )
-
-                        time.sleep(
-                            CHECK_SECONDS
+                while True:
+                    try:
+                        frame = capture_frame(
+                            page,
+                            video
                         )
 
-                finally:
-                    if context is not None:
-                        try:
-                            context.close()
-                        except Exception:
-                            pass
+                        failures = 0
 
-                    try:
-                        browser.close()
-                    except Exception:
-                        pass
+                        process_frame(frame)
+
+                    except RuntimeError as error:
+                        if "YOUTUBE ACCESS BLOCKED" in str(error):
+                            raise
+
+                        failures += 1
+
+                        log(
+                            f"MONITOR ERROR "
+                            f"{failures}: {error}"
+                        )
+
+                    except Exception as error:
+                        failures += 1
+
+                        log(
+                            f"MONITOR ERROR "
+                            f"{failures}: "
+                            f"{type(error).__name__}: {error}"
+                        )
+
+                    if failures >= 3:
+                        raise RuntimeError(
+                            "Restarting browser after "
+                            "three consecutive failures"
+                        )
+
+                    time.sleep(CHECK_SECONDS)
 
         except KeyboardInterrupt:
             log("MONITOR STOPPED")
@@ -370,13 +369,24 @@ def monitor_loop():
 
         except Exception as error:
             log(
-                "MONITOR ERROR: "
-                f"{type(error).__name__}: "
-                f"{error}"
+                f"SESSION ERROR: "
+                f"{type(error).__name__}: {error}"
             )
 
-        log("RECONNECTING IN 30 SECONDS")
+        finally:
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
 
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+
+        log("RECONNECTING IN 30 SECONDS")
         time.sleep(30)
 
 
