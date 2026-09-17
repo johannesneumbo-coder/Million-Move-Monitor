@@ -1,10 +1,13 @@
 import os
 import time
-import re
+import threading
+from io import BytesIO
 
 import cv2
 import numpy as np
 
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from playwright.sync_api import sync_playwright
 
 from detector import detect_signal
@@ -32,6 +35,99 @@ ERROR_RETRY_SECONDS = 60
 VIEWPORT_WIDTH = 1280
 VIEWPORT_HEIGHT = 720
 
+FRAME_PASSWORD = os.getenv(
+    "FRAME_PASSWORD",
+    ""
+)
+
+
+# ============================================================
+# SHARED FRAME
+# ============================================================
+
+_frame_lock = threading.Lock()
+_latest_frame = None
+
+
+def store_frame(frame):
+
+    global _latest_frame
+
+    if frame is None:
+        return
+
+    with _frame_lock:
+
+        _latest_frame = frame.copy()
+
+
+def get_latest_frame():
+
+    with _frame_lock:
+
+        if _latest_frame is None:
+            return None
+
+        return _latest_frame.copy()
+
+
+# ============================================================
+# FRAME VIEWER
+# ============================================================
+
+app = FastAPI()
+
+
+@app.get("/frame")
+def view_frame(password: str = Query(default="")):
+
+    if not FRAME_PASSWORD:
+
+        raise HTTPException(
+            status_code=503,
+            detail="FRAME_PASSWORD is not configured."
+        )
+
+    if password != FRAME_PASSWORD:
+
+        raise HTTPException(
+            status_code=403,
+            detail="Incorrect password."
+        )
+
+    frame = get_latest_frame()
+
+    if frame is None:
+
+        raise HTTPException(
+            status_code=503,
+            detail="No video frame captured yet."
+        )
+
+    success, encoded = cv2.imencode(
+        ".jpg",
+        frame,
+        [
+            cv2.IMWRITE_JPEG_QUALITY,
+            95
+        ]
+    )
+
+    if not success:
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not encode frame."
+        )
+
+    return StreamingResponse(
+        BytesIO(encoded.tobytes()),
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-store"
+        }
+    )
+
 
 # ============================================================
 # SIGNAL KEY
@@ -47,8 +143,13 @@ def make_signal_key(signal):
         return None
 
     try:
-        entry = float(signal["entry"])
+
+        entry = float(
+            signal["entry"]
+        )
+
     except (KeyError, TypeError, ValueError):
+
         return None
 
     return f"{direction}|{entry:.2f}"
@@ -64,8 +165,11 @@ def price_text(value):
         return "Not confirmed"
 
     try:
+
         return f"{float(value):.2f}"
+
     except (TypeError, ValueError):
+
         return "Not confirmed"
 
 
@@ -77,7 +181,11 @@ def format_message(signal):
 
     direction = signal["direction"]
 
-    emoji = "🟢" if direction == "BUY" else "🔴"
+    emoji = (
+        "🟢"
+        if direction == "BUY"
+        else "🔴"
+    )
 
     return (
         f"{emoji} MILLION MOVES V5 SIGNAL\n\n"
@@ -100,7 +208,9 @@ def youtube_block_reason(page):
 
     try:
 
-        body = page.locator("body").inner_text(
+        body = page.locator(
+            "body"
+        ).inner_text(
             timeout=5000
         ).lower()
 
@@ -137,6 +247,7 @@ def get_video_state(page):
             const v = document.querySelector('video');
 
             if (!v) {
+
                 return {
                     found: false,
                     ready: 0,
@@ -144,6 +255,7 @@ def get_video_state(page):
                     height: 0,
                     paused: true
                 };
+
             }
 
             return {
@@ -161,7 +273,7 @@ def get_video_state(page):
 
 
 # ============================================================
-# OPEN VIDEO
+# OPEN YOUTUBE
 # ============================================================
 
 def open_youtube(page):
@@ -207,7 +319,7 @@ def open_youtube(page):
 
 
 # ============================================================
-# START PLAYBACK
+# START VIDEO
 # ============================================================
 
 def start_video(page):
@@ -239,6 +351,7 @@ def start_video(page):
         if not state["found"]:
 
             page.wait_for_timeout(5000)
+
             continue
 
         if (
@@ -360,7 +473,7 @@ def capture_video(page):
         "video"
     ).first.screenshot(
         type="jpeg",
-        quality=85,
+        quality=95,
         timeout=15000
     )
 
@@ -375,6 +488,8 @@ def capture_video(page):
     )
 
     if frame is not None:
+
+        store_frame(frame)
 
         print(
             "FRAME CAPTURED:",
@@ -497,19 +612,9 @@ def run_browser_session(playwright):
 
             if not browser.is_connected():
 
-                print(
-                    "BROWSER DISCONNECTED.",
-                    flush=True
-                )
-
                 return ERROR_RETRY_SECONDS
 
             if page.is_closed():
-
-                print(
-                    "BROWSER PAGE CLOSED.",
-                    flush=True
-                )
 
                 return ERROR_RETRY_SECONDS
 
@@ -539,11 +644,6 @@ def run_browser_session(playwright):
 
                 if failed_frames >= 3:
 
-                    print(
-                        "VIDEO STOPPED. RESTARTING SESSION.",
-                        flush=True
-                    )
-
                     return ERROR_RETRY_SECONDS
 
                 time.sleep(CHECK_SECONDS)
@@ -568,8 +668,11 @@ def run_browser_session(playwright):
         if browser is not None:
 
             try:
+
                 browser.close()
+
             except Exception:
+
                 pass
 
 
@@ -616,7 +719,7 @@ def monitor():
 
 
 # ============================================================
-# DIRECT START
+# START
 # ============================================================
 
 if __name__ == "__main__":
